@@ -1,0 +1,20 @@
+{
+  "name": "tchat-core",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "start:server": "node dist/TchaT-server.js"
+  },
+  "dependencies": {
+    "@libsql/sqlite3": "^0.3.1",
+    "@types/sqlite3": "^3.1.11",
+    "sqlite3": "^6.0.1",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.3"
+  }
+}
