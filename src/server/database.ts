@@ -1,18 +1,98 @@
 import libsql from "@libsql/sqlite3";
-import { Profile, User } from "./user";
-import { Message, MessageKey } from "./message";
-import { Chat, ChatType } from "./chat";
+
+export enum ChatType {
+    DM = 0,
+    GROUP = 1
+}
+
+export class Profile {
+    displayName: string = "";
+    profileImageURL: string = "";
+    bio: string = "";
+
+    constructor(displayName: string, profileImageURL: string, bio: string) {
+        this.displayName = displayName;
+        this.profileImageURL = profileImageURL;
+        this.bio = bio;
+    }
+}
+
+export class Session {
+    session_id: string;
+    username: string;
+
+    constructor(session_id: string, username: string) {
+        this.session_id = session_id;
+        this.username = username;
+    }
+}
+
+export class User {
+    profileInfo: Profile;
+    username: string = "";
+    publicKey: string = "";
+    sessions: Session[] = [];
+
+    constructor(profileInfo: Profile, username: string, publicKey: string, sessions: Session[] = []) {
+        this.profileInfo = profileInfo;
+        this.username = username;
+        this.publicKey = publicKey;
+        this.sessions = sessions;
+    }
+}
+
+export class MessageKey {
+    key: string;
+    user: User;
+
+    constructor(key: string, user: User) {
+        this.key = key;
+        this.user = user;
+    }
+}
+
+export class Message {
+    id: string;
+    author: User;
+    encrypted_data: string;
+    created_at: number;
+    message_keys: MessageKey[];
+
+    constructor(id: string, author: User, encrypted_data: string, created_at: number, message_keys: MessageKey[]) {
+        this.id = id;
+        this.author = author;
+        this.encrypted_data = encrypted_data;
+        this.created_at = created_at;
+        this.message_keys = message_keys;
+    }
+}
+
+export class Chat {
+    id: string;
+    type: ChatType;
+    name: string;
+    created_at: number;
+    users: User[];
+
+    constructor(id: string, type: ChatType, name: string, created_at: number, users: User[]) {
+        this.id = id;
+        this.type = type;
+        this.name = name;
+        this.created_at = created_at;
+        this.users = users;
+    }
+}
 
 export class Database {
     db: libsql.Database;
 
-    // Cache prepared statements to maximize execution speed
     private saveUserStmt!: libsql.Statement;
     private getUserStmt!: libsql.Statement;
     private deleteUserStmt!: libsql.Statement;
     private saveChatStmt!: libsql.Statement;
     private insertParticipantStmt!: libsql.Statement;
     private getChatStmt!: libsql.Statement;
+    private getChatsForUserStmt!: libsql.Statement;
     private getChatUsersStmt!: libsql.Statement;
     private saveMessageStmt!: libsql.Statement;
     private saveMessageKeyStmt!: libsql.Statement;
@@ -20,6 +100,11 @@ export class Database {
     private getMessageKeysStmt!: libsql.Statement;
     private getChatMessagesStmt!: libsql.Statement;
     private deleteMessageStmt!: libsql.Statement;
+    
+    private saveSessionStmt!: libsql.Statement;
+    private getSessionsForUserStmt!: libsql.Statement;
+    private getSessionByIDStmt!: libsql.Statement;
+    private deleteSessionStmt!: libsql.Statement;
 
     constructor(url: string) {
         this.db = new libsql.Database(url);
@@ -67,6 +152,12 @@ export class Database {
                 FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
                 FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+            );
         `);
 
         this.prepareStatements();
@@ -93,6 +184,12 @@ export class Database {
             VALUES (?, ?)
         `);
         this.getChatStmt = this.db.prepare("SELECT * FROM chats WHERE id = ?");
+        this.getChatsForUserStmt = this.db.prepare(`
+            SELECT c.* FROM chats c
+            JOIN chat_participants cp ON c.id = cp.chat_id
+            WHERE cp.username = ?
+            ORDER BY c.created_at DESC
+        `);
         this.getChatUsersStmt = this.db.prepare(`
             SELECT u.* FROM users u
             JOIN chat_participants cp ON u.username = cp.username
@@ -126,6 +223,38 @@ export class Database {
             ORDER BY m.created_at ASC
         `);
         this.deleteMessageStmt = this.db.prepare("DELETE FROM messages WHERE id = ?");
+
+        this.saveSessionStmt = this.db.prepare(`
+            INSERT OR REPLACE INTO sessions (session_id, username) VALUES (?, ?)
+        `);
+        this.getSessionsForUserStmt = this.db.prepare(`
+            SELECT * FROM sessions WHERE username = ?
+        `);
+        this.getSessionByIDStmt = this.db.prepare(`
+            SELECT * FROM sessions WHERE session_id = ?
+        `);
+        this.deleteSessionStmt = this.db.prepare(`
+            DELETE FROM sessions WHERE session_id = ?
+        `);
+    }
+
+    saveSession(session: Session) {
+        this.saveSessionStmt.run(session.session_id, session.username);
+    }
+
+    getSessionsByUsername(username: string): Session[] {
+        const rows = this.getSessionsForUserStmt.all(username) as unknown as any[];
+        return rows.map(row => new Session(row.session_id, row.username));
+    }
+
+    getSessionsByID(id: string): Session | null {
+        const row = this.getSessionByIDStmt.get(id) as unknown as { session_id: string; username: string } | undefined;
+        if (!row) return null;
+        return new Session(row.session_id, row.username);
+    }
+
+    deleteSession(sessionId: string) {
+        this.deleteSessionStmt.run(sessionId);
     }
 
     saveUser(user: User) {
@@ -136,16 +265,24 @@ export class Database {
             user.profileInfo.profileImageURL,
             user.profileInfo.bio
         );
+        if (user.sessions && user.sessions.length > 0) {
+            for (const session of user.sessions) {
+                this.saveSession(session);
+            }
+        }
     }
 
     getUser(username: string): User | null {
         const row = this.getUserStmt.get(username) as any;
         if (!row) return null;
 
+        const sessions = this.getSessionsByUsername(username);
+
         return new User(
             new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
             row.username,
-            row.public_key
+            row.public_key,
+            sessions
         );
     }
 
@@ -167,11 +304,14 @@ export class Database {
         if (!chatRow) return null;
 
         const userRows = this.getChatUsersStmt.all(chatId) as unknown as any[];
-        const users = userRows.map(row => new User(
-            new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
-            row.username,
-            row.public_key
-        ));
+        const users = userRows.map(row => {
+            return new User(
+                new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
+                row.username,
+                row.public_key,
+                []
+            );
+        });
 
         return new Chat(
             chatRow.id,
@@ -180,6 +320,33 @@ export class Database {
             chatRow.created_at,
             users
         );
+    }
+
+    getChatsByUsername(username: string): Chat[] {
+        const chatRows = this.getChatsForUserStmt.all(username) as unknown as any[];
+        
+        return chatRows.map(chatRow => {
+            const userRows = this.getChatUsersStmt.all(chatRow.id) as unknown as any[];
+            
+            const users = userRows.map(row => {
+                const sessions = row.username === username ? this.getSessionsByUsername(row.username) : [];
+
+                return new User(
+                    new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
+                    row.username,
+                    row.public_key,
+                    sessions
+                );
+            });
+    
+            return new Chat(
+                chatRow.id,
+                chatRow.type as ChatType,
+                chatRow.name || "",
+                chatRow.created_at,
+                users
+            );
+        });
     }
 
     getOrCreateDM(myUsername: string, theirUsername: string): string {
@@ -212,13 +379,20 @@ export class Database {
         const messageRow = this.getMessageStmt.get(messageId) as any;
         if (!messageRow) return null;
 
-        const author = this.getUser(messageRow.author);
-        if (!author) throw new Error(`Data integrity issue: Author ${messageRow.author} missing.`);
+        const authorRow = this.getUserStmt.get(messageRow.author) as any;
+        if (!authorRow) throw new Error(`Data integrity issue: Author ${messageRow.author} missing.`);
+        
+        const author = new User(
+            new Profile(authorRow.display_name || "", authorRow.profile_image_url || "", authorRow.bio || ""),
+            authorRow.username,
+            authorRow.public_key,
+            []
+        );
 
         const keyRows = this.getMessageKeysStmt.all(messageId) as unknown as any[];
         const messageKeys = keyRows.map(row => {
             const recipientProfile = new Profile(row.display_name || "", row.profile_image_url || "", row.bio || "");
-            const recipientUser = new User(recipientProfile, row.username, row.public_key);
+            const recipientUser = new User(recipientProfile, row.username, row.public_key, []);
             return new MessageKey(row.encrypted_key, recipientUser);
         });
 
@@ -236,12 +410,12 @@ export class Database {
 
         return rows.map(row => {
             const profile = new Profile(row.display_name || "", row.profile_image_url || "", row.bio || "");
-            const author = new User(profile, row.username, row.public_key);
+            const author = new User(profile, row.username, row.public_key, []);
 
             const keyRows = this.getMessageKeysStmt.all(row.message_id) as unknown as any[];
             const messageKeys = keyRows.map(kRow => {
                 const recProfile = new Profile(kRow.display_name || "", kRow.profile_image_url || "", kRow.bio || "");
-                const recUser = new User(recProfile, kRow.username, kRow.public_key);
+                const recUser = new User(recProfile, kRow.username, kRow.public_key, []);
                 return new MessageKey(kRow.encrypted_key, recUser);
             });
 
