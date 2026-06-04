@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 
 type ConfigParams = {
     port: number;
+    dbURL: string;
 }
 
 export class Config {
@@ -19,6 +20,14 @@ export class Config {
         this.data.port = port;
     }
 
+    getDBURL(): string {
+        return this.data.dbURL
+    }
+
+    setDBURL(url: string) {
+        this.data.dbURL = url;
+    }
+
     update(path: string) {
         writeFileSync(path, JSON.stringify(this.data, null, 4))
     }
@@ -31,4 +40,4 @@ export class Config {
 }
 
 
-export const defaultConfig = new Config({port: 8080});
+export const defaultConfig = new Config({port: 8080, dbURL: "file:tchat.db"});

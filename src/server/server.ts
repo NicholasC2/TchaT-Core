@@ -1,12 +1,12 @@
-import libsql from "@libsql/sqlite3";
 import { Config, defaultConfig } from "./config";
 import { User, Profile } from "./user.js";
 import WebSocket, { WebSocketServer } from "ws";
 import { MessageType } from "../core/events.js";
+import { Database } from "./database.js";
 
 export class Server {
-    db: libsql.Database;
     wss: WebSocketServer;
+    db: Database;
 
     sendMessage(client: WebSocket, type: MessageType = MessageType.NONE, data: Object = {}) {
         client.send(JSON.stringify({
@@ -16,8 +16,7 @@ export class Server {
     }
 
     constructor(config: Config = defaultConfig) {
-        this.db = this.setupDB();
-
+        this.db = new Database(config.getDBURL());
         this.wss = this.setupWSS(config);
     }
 
@@ -46,17 +45,36 @@ export class Server {
                 heartbeatTime = timestamp
 
                 switch(type) {
-                    case 0: {
+                    case MessageType.NONE: {
                         break;
                     }
 
-                    case 1: {
+                    case MessageType.CREATE_ACCOUNT: {
                         const { username, publicKey, profileInfo } = data;
                         const { displayName, profileImageURL, bio } = profileInfo
 
+                        if(this.db.getUser(username)) {
+                            socket.send(JSON.stringify({
+                                t: MessageType.ERROR,
+                                d: {
+                                    message: "Username already in use!"
+                                }
+                            }))
+                            
+                            return;
+                        }
+
                         const newUser = new User(new Profile(displayName, profileImageURL, bio), username, publicKey);
 
-                        
+                        this.db.saveUser(newUser);
+                    }
+
+                    case MessageType.DELETE_ACCOUNT: {
+                        const { username, private_key } = data;
+
+                        // verify
+
+                        this.db.deleteUser(username);
                     }
                 }
             })
@@ -73,41 +91,5 @@ export class Server {
         })
 
         return server;
-    }
-
-    setupDB(): libsql.Database {
-        const db = new libsql.Database("file:tchat.db");
-
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                public_key TEXT NOT NULL,
-                display_name TEXT,
-                profile_image_url TEXT,
-                bio TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                author TEXT NOT NULL,
-                encrypted_content TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-
-                FOREIGN KEY(author) REFERENCES users(username)
-            );
-
-            CREATE TABLE IF NOT EXISTS message_keys (
-                message_id INTEGER NOT NULL,
-                username TEXT NOT NULL,
-                encrypted_key TEXT NOT NULL,
-
-                PRIMARY KEY(message_id, username),
-
-                FOREIGN KEY(message_id) REFERENCES messages(id),
-                FOREIGN KEY(username) REFERENCES users(username)
-            );
-        `);
-
-        return db;
     }
 }
