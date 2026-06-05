@@ -1,7 +1,7 @@
 import { Config, defaultConfig } from "./config";
-import WebSocket, { WebSocketServer } from "ws";
+import { WebSocketServer } from "ws";
 import { MessageType } from "../core/events.js";
-import { Chat, ChatType, Database, GroupChat, GroupChatUser, Profile, Session, User } from "./database.js";
+import { Database, GroupChat, Profile, Session, User } from "./database.js";
 import * as crypto from "crypto"
 
 interface ActiveChallenge {
@@ -63,6 +63,7 @@ export class Server {
                             const newUser = new User(new Profile(displayName, profileImageURL, bio), username, publicKey);
                             this.db.saveUser(newUser);
                             sendMessage(MessageType.SUCCESS, { message: "Account created!" });
+                            
                             break;
                         }
 
@@ -85,6 +86,7 @@ export class Server {
                             }, 30000);
 
                             sendMessage(MessageType.CHALLENGE_ISSUED, { challenge, intent });
+
                             break;
                         }
 
@@ -129,6 +131,7 @@ export class Server {
                                 this.db.deleteUser(username);
                                 sendMessage(MessageType.SUCCESS, { message: "Account deleted successfully." });
                             }
+
                             break;
                         }
 
@@ -143,7 +146,7 @@ export class Server {
                             }
 
                             const chats = this.db.getAllChatsByUsername(session.username);
-                            sendMessage(MessageType.SUCCESS, {chats})
+                            sendMessage(MessageType.SUCCESS, chats)
                             
                             break;
                         }
@@ -154,9 +157,93 @@ export class Server {
                             break;
                         }
 
+                        case MessageType.DM_CHAT_DELETE: {
+                            const { sessionID, chatID } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getDM(chatID);
+
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "DM doesn't exist" })
+                                return;
+                            }
+
+                            if(chat.userOne.username === session.username || chat.userTwo.username === session.username) {
+                                this.db.deleteChat(chatID);
+                                sendMessage(MessageType.SUCCESS);
+                            } else {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this DM" })
+                            }
+
+                            break;
+                        }
+
+                        case MessageType.DM_CHAT_GET: {
+                            const { sessionID, chatID } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getDM(chatID);
+
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "DM doesn't exist" })
+                                return;
+                            }
+
+                            if(chat.userOne.username === session.username || chat.userTwo.username === session.username) {
+                                sendMessage(MessageType.SUCCESS, chat);
+                            } else {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this DM" })
+                            }
+
+                            break;
+                        }
+
+                        case MessageType.DM_CHAT_GET_PARTICIPANTS_KEYS: {
+                            const { sessionID, chatID } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getDM(chatID);
+
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "DM doesn't exist" })
+                                return;
+                            }
+
+                            if(chat.userOne.username === session.username || chat.userTwo.username === session.username) {
+                                const keys = {
+                                    [chat.userOne.username]: chat.userOne.publicKey,
+                                    [chat.userTwo.username]: chat.userTwo.publicKey
+                                }
+
+                                sendMessage(MessageType.SUCCESS, keys);
+                            } else {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this DM" })
+                            }
+
+                            break;
+                        }
+
                         case MessageType.GROUP_CHAT_CREATE: {
                             const { sessionID, chatInfo } = data;
-                            const { name, type } = chatInfo;
+                            const { name } = chatInfo;
 
                             const session = this.db.getSessionsByID(sessionID);
                             
@@ -176,7 +263,9 @@ export class Server {
 
                             this.db.saveGroupChat(chat);
 
-                            sendMessage(MessageType.SUCCESS, { chat });
+                            sendMessage(MessageType.SUCCESS, chat);
+
+                            break;
                         }
 
                         case MessageType.GROUP_CHAT_DELETE: {
@@ -189,20 +278,127 @@ export class Server {
                                 return;
                             }
 
-                            const chat = this.db.getChat(chatID);
+                            const chat = this.db.getGroupChat(chatID);
 
-                            chat?.users.find((user) => user.admin)
-
-                            const user = this.db.getUser(session.username);
-
-                            if(!user) {
-                                sendMessage(MessageType.ERROR, { message: "Invalid user!" })
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid chat id!" })
                                 return;
                             }
 
-                            
+                            const user = chat.users.find(u => u.username == session.username);
 
-                            this.db.deleteChat(chatID);
+                            if(!user) {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this chat" })
+                                return;
+                            }
+
+                            if(user.admin) {
+                                this.db.deleteChat(chatID);
+                                sendMessage(MessageType.SUCCESS)
+                            } else {
+                                sendMessage(MessageType.ERROR, { message: "You are not an admin" })
+                            }
+
+                            break;
+                        }
+
+                        case MessageType.GROUP_CHAT_EDIT: {
+                            const { sessionID, chatID, chatData } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getGroupChat(chatID);
+
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid chat id!" })
+                                return;
+                            }
+
+                            const user = chat.users.find(u => u.username == session.username);
+
+                            if(!user) {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this chat" })
+                                return;
+                            }
+
+                            if(user.admin) {
+                                this.db.saveGroupChat({ 
+                                    created_at: chat.created_at,
+                                    id: chat.id,
+                                    type: chat.type,
+
+                                    users: chatData.users ?? chat.users,
+                                    name: chatData.name ?? chat.name
+                                });
+                                sendMessage(MessageType.SUCCESS);
+                            } else {
+                                sendMessage(MessageType.ERROR, { message: "You are not an admin" })
+                            }
+
+                            break;
+                        }
+
+                        case MessageType.GROUP_CHAT_GET: {
+                            const { sessionID, chatID } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getGroupChat(chatID);
+
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid chat id!" })
+                                return;
+                            }
+
+                            const user = chat.users.find(u => u.username == session.username);
+
+                            if(!user) {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this chat" })
+                                return;
+                            }
+
+                            sendMessage(MessageType.SUCCESS, chat);
+
+                            break;
+                        }
+
+                        case MessageType.GROUP_CHAT_GET_PARTICIPANTS_KEYS: {
+                            const { sessionID, chatID } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getGroupChat(chatID);
+
+                            if(!chat) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid chat id!" })
+                                return;
+                            }
+
+                            const user = chat.users.find(u => u.username == session.username);
+
+                            if(!user) {
+                                sendMessage(MessageType.ERROR, { message: "You are not a part of this chat" })
+                                return;
+                            }
+
+                            sendMessage(MessageType.SUCCESS, chat.users.map(u => u.publicKey));
+
+                            break;
                         }
                     }
                 } catch (error) {
