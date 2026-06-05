@@ -39,6 +39,19 @@ export class User {
         this.publicKey = publicKey;
         this.sessions = sessions;
     }
+
+    /**
+     * Converts a base User instance into a GroupChatUser instance.
+     */
+    toGroupChatUser(admin: boolean = false): GroupChatUser {
+        return new GroupChatUser(
+            this.profileInfo,
+            this.username,
+            this.publicKey,
+            this.sessions,
+            admin
+        );
+    }
 }
 
 export class MessageKey {
@@ -67,18 +80,57 @@ export class Message {
     }
 }
 
-export class Chat {
+export class GroupChatUser extends User {
+    admin: boolean = false;
+
+    constructor(profileInfo: Profile, username: string, publicKey: string, sessions: Session[] = [], admin: boolean = false) {
+        super(profileInfo, username, publicKey, sessions);
+        this.admin = admin;
+    }
+
+    /**
+     * Converts a GroupChatUser instance back into a clean base User instance.
+     */
+    toUser(): User {
+        return new User(
+            this.profileInfo,
+            this.username,
+            this.publicKey,
+            this.sessions
+        );
+    }
+}
+
+export abstract class Chat {
     id: string;
     type: ChatType;
-    name: string;
     created_at: number;
-    users: User[];
 
-    constructor(id: string, type: ChatType, name: string, created_at: number, users: User[]) {
+    constructor(id: string, type: ChatType, created_at: number) {
         this.id = id;
         this.type = type;
-        this.name = name;
         this.created_at = created_at;
+    }
+}
+
+export class DMChat extends Chat {
+    userOne: User;
+    userTwo: User;
+
+    constructor(id: string, created_at: number, userOne: User, userTwo: User) {
+        super(id, ChatType.DM, created_at);
+        this.userOne = userOne;
+        this.userTwo = userTwo;
+    }
+}
+
+export class GroupChat extends Chat {
+    name: string;
+    users: GroupChatUser[];
+
+    constructor(id: string, name: string, created_at: number, users: GroupChatUser[]) {
+        super(id, ChatType.GROUP, created_at);
+        this.name = name;
         this.users = users;
     }
 }
@@ -89,11 +141,18 @@ export class Database {
     private saveUserStmt!: libsql.Statement;
     private getUserStmt!: libsql.Statement;
     private deleteUserStmt!: libsql.Statement;
-    private saveChatStmt!: libsql.Statement;
-    private insertParticipantStmt!: libsql.Statement;
-    private getChatStmt!: libsql.Statement;
-    private getChatsForUserStmt!: libsql.Statement;
-    private getChatUsersStmt!: libsql.Statement;
+    
+    private saveGroupChatStmt!: libsql.Statement;
+    private insertGroupParticipantStmt!: libsql.Statement;
+    private getGroupChatStmt!: libsql.Statement;
+    private getGroupChatUsersStmt!: libsql.Statement;
+    
+    private saveDMStmt!: libsql.Statement;
+    private getDMStmt!: libsql.Statement;
+    
+    private getGroupChatsForUserStmt!: libsql.Statement;
+    private getDMsForUserStmt!: libsql.Statement;
+    
     private saveMessageStmt!: libsql.Statement;
     private saveMessageKeyStmt!: libsql.Statement;
     private getMessageStmt!: libsql.Statement;
@@ -119,19 +178,29 @@ export class Database {
                 bio TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS chats (
+            CREATE TABLE IF NOT EXISTS group_chats (
                 id TEXT PRIMARY KEY,
-                type INTEGER NOT NULL,
-                name TEXT,
+                name TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS chat_participants (
-                chat_id TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS group_chat_participants (
+                group_chat_id TEXT NOT NULL,
                 username TEXT NOT NULL,
-                PRIMARY KEY(chat_id, username),
-                FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+                admin BOOLEAN NOT NULL DEFAULT 0,
+                PRIMARY KEY(group_chat_id, username),
+                FOREIGN KEY(group_chat_id) REFERENCES group_chats(id) ON DELETE CASCADE,
                 FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS dms (
+                id TEXT PRIMARY KEY,
+                user_one TEXT NOT NULL,
+                user_two TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(user_one, user_two),
+                FOREIGN KEY(user_one) REFERENCES users(username) ON DELETE CASCADE,
+                FOREIGN KEY(user_two) REFERENCES users(username) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -140,7 +209,6 @@ export class Database {
                 author TEXT NOT NULL,
                 encrypted_data TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
-                FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE,
                 FOREIGN KEY(author) REFERENCES users(username) ON DELETE CASCADE
             );
 
@@ -175,200 +243,171 @@ export class Database {
         this.getUserStmt = this.db.prepare("SELECT * FROM users WHERE username = ?");
         this.deleteUserStmt = this.db.prepare("DELETE FROM users WHERE username = ?");
         
-        this.saveChatStmt = this.db.prepare(`
-            INSERT OR REPLACE INTO chats (id, type, name, created_at)
-            VALUES (?, ?, ?, ?)
+        // Group Chats
+        this.saveGroupChatStmt = this.db.prepare(`
+            INSERT INTO group_chats (id, name, created_at) VALUES (?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name
         `);
-        this.insertParticipantStmt = this.db.prepare(`
-            INSERT OR IGNORE INTO chat_participants (chat_id, username)
-            VALUES (?, ?)
+        this.insertGroupParticipantStmt = this.db.prepare(`
+            INSERT INTO group_chat_participants (group_chat_id, username, admin) VALUES (?, ?, ?)
+            ON CONFLICT(group_chat_id, username) DO UPDATE SET admin = excluded.admin
         `);
-        this.getChatStmt = this.db.prepare("SELECT * FROM chats WHERE id = ?");
-        this.getChatsForUserStmt = this.db.prepare(`
-            SELECT c.* FROM chats c
-            JOIN chat_participants cp ON c.id = cp.chat_id
-            WHERE cp.username = ?
-            ORDER BY c.created_at DESC
-        `);
-        this.getChatUsersStmt = this.db.prepare(`
-            SELECT u.* FROM users u
-            JOIN chat_participants cp ON u.username = cp.username
-            WHERE cp.chat_id = ?
+        this.getGroupChatStmt = this.db.prepare("SELECT * FROM group_chats WHERE id = ?");
+        this.getGroupChatUsersStmt = this.db.prepare(`
+            SELECT u.*, gcp.admin FROM users u
+            JOIN group_chat_participants gcp ON u.username = gcp.username
+            WHERE gcp.group_chat_id = ?
         `);
 
+        // DMs
+        this.saveDMStmt = this.db.prepare(`
+            INSERT INTO dms (id, user_one, user_two, created_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
+        `);
+        this.getDMStmt = this.db.prepare("SELECT * FROM dms WHERE id = ?");
+
+        // Feeds
+        this.getGroupChatsForUserStmt = this.db.prepare(`
+            SELECT gc.* FROM group_chats gc
+            JOIN group_chat_participants gcp ON gc.id = gcp.group_chat_id
+            WHERE gcp.username = ? ORDER BY gc.created_at DESC
+        `);
+        this.getDMsForUserStmt = this.db.prepare(`
+            SELECT * FROM dms WHERE user_one = ? OR user_two = ? ORDER BY created_at DESC
+        `);
+
+        // Messages
         this.saveMessageStmt = this.db.prepare(`
-            INSERT OR REPLACE INTO messages (id, chat_id, author, encrypted_data, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO messages (id, chat_id, author, encrypted_data, created_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET encrypted_data = excluded.encrypted_data
         `);
         this.saveMessageKeyStmt = this.db.prepare(`
-            INSERT OR REPLACE INTO message_keys (message_id, username, encrypted_key)
-            VALUES (?, ?, ?)
+            INSERT INTO message_keys (message_id, username, encrypted_key) VALUES (?, ?, ?)
+            ON CONFLICT(message_id, username) DO UPDATE SET encrypted_key = excluded.encrypted_key
         `);
         this.getMessageStmt = this.db.prepare("SELECT * FROM messages WHERE id = ?");
         
         this.getMessageKeysStmt = this.db.prepare(`
-            SELECT mk.encrypted_key, u.*
-            FROM message_keys mk
+            SELECT mk.encrypted_key, u.* FROM message_keys mk
             JOIN users u ON mk.username = u.username
             WHERE mk.message_id = ?
         `);
-
         this.getChatMessagesStmt = this.db.prepare(`
-            SELECT 
-                m.id AS message_id, m.encrypted_data, m.created_at,
-                u.username, u.display_name, u.profile_image_url, u.bio, u.public_key
+            SELECT m.id AS message_id, m.encrypted_data, m.created_at, u.username, u.display_name, u.profile_image_url, u.bio, u.public_key
             FROM messages m
             JOIN users u ON m.author = u.username
-            WHERE m.chat_id = ? 
-            ORDER BY m.created_at ASC
+            WHERE m.chat_id = ? ORDER BY m.created_at ASC
         `);
         this.deleteMessageStmt = this.db.prepare("DELETE FROM messages WHERE id = ?");
 
+        // Sessions
         this.saveSessionStmt = this.db.prepare(`
-            INSERT OR REPLACE INTO sessions (session_id, username) VALUES (?, ?)
+            INSERT INTO sessions (session_id, username) VALUES (?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET username = excluded.username
         `);
-        this.getSessionsForUserStmt = this.db.prepare(`
-            SELECT * FROM sessions WHERE username = ?
-        `);
-        this.getSessionByIDStmt = this.db.prepare(`
-            SELECT * FROM sessions WHERE session_id = ?
-        `);
-        this.deleteSessionStmt = this.db.prepare(`
-            DELETE FROM sessions WHERE session_id = ?
-        `);
+        this.getSessionsForUserStmt = this.db.prepare("SELECT * FROM sessions WHERE username = ?");
+        this.getSessionByIDStmt = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
+        this.deleteSessionStmt = this.db.prepare("DELETE FROM sessions WHERE session_id = ?");
     }
 
-    saveSession(session: Session) {
-        this.saveSessionStmt.run(session.session_id, session.username);
-    }
-
+    /* --- Session Handling --- */
+    saveSession(session: Session) { this.saveSessionStmt.run(session.session_id, session.username); }
     getSessionsByUsername(username: string): Session[] {
         const rows = this.getSessionsForUserStmt.all(username) as unknown as any[];
-        return rows.map(row => new Session(row.session_id, row.username));
+        return rows.map(r => new Session(r.session_id, r.username));
     }
-
     getSessionsByID(id: string): Session | null {
-        const row = this.getSessionByIDStmt.get(id) as unknown as { session_id: string; username: string } | undefined;
-        if (!row) return null;
-        return new Session(row.session_id, row.username);
+        const r = this.getSessionByIDStmt.get(id) as any;
+        return r ? new Session(r.session_id, r.username) : null;
     }
+    deleteSession(sessionId: string) { this.deleteSessionStmt.run(sessionId); }
 
-    deleteSession(sessionId: string) {
-        this.deleteSessionStmt.run(sessionId);
-    }
-
+    /* --- User Handling --- */
     saveUser(user: User) {
-        this.saveUserStmt.run(
-            user.username,
-            user.publicKey,
-            user.profileInfo.displayName,
-            user.profileInfo.profileImageURL,
-            user.profileInfo.bio
-        );
-        if (user.sessions && user.sessions.length > 0) {
-            for (const session of user.sessions) {
-                this.saveSession(session);
-            }
-        }
+        this.saveUserStmt.run(user.username, user.publicKey, user.profileInfo.displayName, user.profileInfo.profileImageURL, user.profileInfo.bio);
+        if (user.sessions) user.sessions.forEach(s => this.saveSession(s));
     }
-
     getUser(username: string): User | null {
-        const row = this.getUserStmt.get(username) as any;
-        if (!row) return null;
-
-        const sessions = this.getSessionsByUsername(username);
-
-        return new User(
-            new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
-            row.username,
-            row.public_key,
-            sessions
-        );
+        const r = this.getUserStmt.get(username) as any;
+        if (!r) return null;
+        return new User(new Profile(r.display_name || "", r.profile_image_url || "", r.bio || ""), r.username, r.public_key, this.getSessionsByUsername(username));
     }
+    deleteUser(username: string) { this.deleteUserStmt.run(username); }
 
-    deleteUser(username: string) {
-        this.deleteUserStmt.run(username);
-    }
-
-    saveChat(chat: Chat) {
-        this.saveChatStmt.run(chat.id, chat.type, chat.name || null, chat.created_at);
-
+    /* --- Group Chat Handling --- */
+    saveGroupChat(chat: GroupChat) {
+        this.saveGroupChatStmt.run(chat.id, chat.name, chat.created_at);
         for (const user of chat.users) {
             this.saveUser(user);
-            this.insertParticipantStmt.run(chat.id, user.username);
+            this.insertGroupParticipantStmt.run(chat.id, user.username, user.admin ? 1 : 0);
         }
     }
 
-    getChat(chatId: string): Chat | null {
-        const chatRow = this.getChatStmt.get(chatId) as any;
-        if (!chatRow) return null;
-
-        const userRows = this.getChatUsersStmt.all(chatId) as unknown as any[];
-        const users = userRows.map(row => {
-            return new User(
-                new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
-                row.username,
-                row.public_key,
-                []
-            );
-        });
-
-        return new Chat(
-            chatRow.id,
-            chatRow.type as ChatType,
-            chatRow.name || "",
-            chatRow.created_at,
-            users
-        );
+    getGroupChat(chatId: string): GroupChat | null {
+        const r = this.getGroupChatStmt.get(chatId) as any;
+        if (!r) return null;
+        const uRows = this.getGroupChatUsersStmt.all(chatId) as unknown as any[];
+        const users = uRows.map(u => new GroupChatUser(new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), u.username, u.public_key, [], u.admin === 1));
+        return new GroupChat(r.id, r.name, r.created_at, users);
     }
 
-    getChatsByUsername(username: string): Chat[] {
-        const chatRows = this.getChatsForUserStmt.all(username) as unknown as any[];
-        
-        return chatRows.map(chatRow => {
-            const userRows = this.getChatUsersStmt.all(chatRow.id) as unknown as any[];
-            
-            const users = userRows.map(row => {
-                const sessions = row.username === username ? this.getSessionsByUsername(row.username) : [];
-
-                return new User(
-                    new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""),
-                    row.username,
-                    row.public_key,
-                    sessions
-                );
-            });
-    
-            return new Chat(
-                chatRow.id,
-                chatRow.type as ChatType,
-                chatRow.name || "",
-                chatRow.created_at,
-                users
-            );
-        });
-    }
-
+    /* --- DM Handling --- */
     getOrCreateDM(myUsername: string, theirUsername: string): string {
-        const chatId = "dm_" + [myUsername, theirUsername].sort().join("_");
-        
-        const chatStmt = this.db.prepare("INSERT OR IGNORE INTO chats (id, type, name, created_at) VALUES (?, ?, NULL, ?)");
-        chatStmt.run(chatId, ChatType.DM, Date.now());
-
-        this.insertParticipantStmt.run(chatId, myUsername);
-        this.insertParticipantStmt.run(chatId, theirUsername);
-
+        const usersSorted = [myUsername, theirUsername].sort();
+        const chatId = `dm_${usersSorted[0]}_${usersSorted[1]}`;
+        this.saveDMStmt.run(chatId, usersSorted[0], usersSorted[1], Date.now());
         return chatId;
     }
 
-    deleteChat(chatId: string) {
-        const stmt = this.db.prepare("DELETE FROM chats WHERE id = ?");
-        stmt.run(chatId);
+    getDM(chatId: string): DMChat | null {
+        const r = this.getDMStmt.get(chatId) as any;
+        if (!r) return null;
+        
+        const u1 = this.getUser(r.user_one);
+        const u2 = this.getUser(r.user_two);
+        if (!u1 || !u2) return null;
+
+        return new DMChat(r.id, r.created_at, u1, u2);
     }
 
+    /* --- Combined Feeds Hook --- */
+    getAllChatsByUsername(username: string): Chat[] {
+        const chats: Chat[] = [];
+        
+        // Fetch groups
+        const groupRows = this.getGroupChatsForUserStmt.all(username) as unknown as any[];
+        groupRows.forEach(g => {
+            const uRows = this.getGroupChatUsersStmt.all(g.id) as unknown as any[];
+            const users = uRows.map(u => new GroupChatUser(new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), u.username, u.public_key, u.username === username ? this.getSessionsByUsername(u.username) : [], u.admin === 1));
+            chats.push(new GroupChat(g.id, g.name, g.created_at, users));
+        });
+
+        // Fetch DMs
+        const dmRows = this.getDMsForUserStmt.all(username, username) as unknown as any[];
+        dmRows.forEach(d => {
+            const u1 = this.getUser(d.user_one);
+            const u2 = this.getUser(d.user_two);
+            if (u1 && u2) {
+                if (u1.username === username) u1.sessions = this.getSessionsByUsername(username);
+                if (u2.username === username) u2.sessions = this.getSessionsByUsername(username);
+                chats.push(new DMChat(d.id, d.created_at, u1, u2));
+            }
+        });
+
+        return chats.sort((a, b) => b.created_at - a.created_at);
+    }
+
+    deleteChat(chatId: string) {
+        if (chatId.startsWith("dm_")) {
+            this.db.prepare("DELETE FROM dms WHERE id = ?").run(chatId);
+        } else {
+            this.db.prepare("DELETE FROM group_chats WHERE id = ?").run(chatId);
+        }
+    }
+
+    /* --- Message Handling --- */
     saveMessage(chatId: string, message: Message) {
         this.saveMessageStmt.run(message.id, chatId, message.author.username, message.encrypted_data, message.created_at);
-        
         for (const msgKey of message.message_keys) {
             this.saveUser(msgKey.user);
             this.saveMessageKeyStmt.run(message.id, msgKey.user.username, msgKey.key);
@@ -376,60 +415,26 @@ export class Database {
     }
 
     getMessage(messageId: string): Message | null {
-        const messageRow = this.getMessageStmt.get(messageId) as any;
-        if (!messageRow) return null;
-
-        const authorRow = this.getUserStmt.get(messageRow.author) as any;
-        if (!authorRow) throw new Error(`Data integrity issue: Author ${messageRow.author} missing.`);
+        const m = this.getMessageStmt.get(messageId) as any;
+        if (!m) return null;
         
-        const author = new User(
-            new Profile(authorRow.display_name || "", authorRow.profile_image_url || "", authorRow.bio || ""),
-            authorRow.username,
-            authorRow.public_key,
-            []
-        );
+        const a = this.getUser(m.author);
+        if (!a) return null;
 
-        const keyRows = this.getMessageKeysStmt.all(messageId) as unknown as any[];
-        const messageKeys = keyRows.map(row => {
-            const recipientProfile = new Profile(row.display_name || "", row.profile_image_url || "", row.bio || "");
-            const recipientUser = new User(recipientProfile, row.username, row.public_key, []);
-            return new MessageKey(row.encrypted_key, recipientUser);
-        });
-
-        return new Message(
-            messageRow.id,
-            author,
-            messageRow.encrypted_data,
-            messageRow.created_at,
-            messageKeys
-        );
+        const kRows = this.getMessageKeysStmt.all(messageId) as unknown as any[];
+        const messageKeys = kRows.map(k => new MessageKey(k.encrypted_key, new User(new Profile(k.display_name || "", k.profile_image_url || "", k.bio || ""), k.username, k.public_key, [])));
+        return new Message(m.id, a, m.encrypted_data, m.created_at, messageKeys);
     }
 
     getChatMessages(chatId: string): Message[] {
         const rows = this.getChatMessagesStmt.all(chatId) as unknown as any[];
-
         return rows.map(row => {
-            const profile = new Profile(row.display_name || "", row.profile_image_url || "", row.bio || "");
-            const author = new User(profile, row.username, row.public_key, []);
-
-            const keyRows = this.getMessageKeysStmt.all(row.message_id) as unknown as any[];
-            const messageKeys = keyRows.map(kRow => {
-                const recProfile = new Profile(kRow.display_name || "", kRow.profile_image_url || "", kRow.bio || "");
-                const recUser = new User(recProfile, kRow.username, kRow.public_key, []);
-                return new MessageKey(kRow.encrypted_key, recUser);
-            });
-
-            return new Message(
-                row.message_id, 
-                author, 
-                row.encrypted_data, 
-                row.created_at,
-                messageKeys
-            );
+            const author = new User(new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""), row.username, row.public_key, []);
+            const kRows = this.getMessageKeysStmt.all(row.message_id) as unknown as any[];
+            const messageKeys = kRows.map(k => new MessageKey(k.encrypted_key, new User(new Profile(k.display_name || "", k.profile_image_url || "", k.bio || ""), k.username, k.public_key, [])));
+            return new Message(row.message_id, author, row.encrypted_data, row.created_at, messageKeys);
         });
     }
 
-    deleteMessage(messageId: string) {
-        this.deleteMessageStmt.run(messageId);
-    }
+    deleteMessage(messageId: string) { this.deleteMessageStmt.run(messageId); }
 }

@@ -1,7 +1,7 @@
 import { Config, defaultConfig } from "./config";
 import WebSocket, { WebSocketServer } from "ws";
 import { MessageType } from "../core/events.js";
-import { Chat, ChatType, Database, Profile, Session, User } from "./database.js";
+import { Chat, ChatType, Database, GroupChat, GroupChatUser, Profile, Session, User } from "./database.js";
 import * as crypto from "crypto"
 
 interface ActiveChallenge {
@@ -142,8 +142,8 @@ export class Server {
                                 return;
                             }
 
-                            const chats = this.db.getChatsByUsername(session.username);
-                            sendMessage(MessageType.SUCCESS, chats)
+                            const chats = this.db.getAllChatsByUsername(session.username);
+                            sendMessage(MessageType.SUCCESS, {chats})
                             
                             break;
                         }
@@ -154,7 +154,7 @@ export class Server {
                             break;
                         }
 
-                        case MessageType.CHAT_CREATE: {
+                        case MessageType.GROUP_CHAT_CREATE: {
                             const { sessionID, chatInfo } = data;
                             const { name, type } = chatInfo;
 
@@ -172,7 +172,37 @@ export class Server {
                                 return;
                             }
 
-                            // WIP
+                            const chat = new GroupChat(crypto.randomUUID(), name, Date.now(), [user.toGroupChatUser(true)])
+
+                            this.db.saveGroupChat(chat);
+
+                            sendMessage(MessageType.SUCCESS, { chat });
+                        }
+
+                        case MessageType.GROUP_CHAT_DELETE: {
+                            const { sessionID, chatID } = data;
+
+                            const session = this.db.getSessionsByID(sessionID);
+
+                            if(!session) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid session ID!" })
+                                return;
+                            }
+
+                            const chat = this.db.getChat(chatID);
+
+                            chat?.users.find((user) => user.admin)
+
+                            const user = this.db.getUser(session.username);
+
+                            if(!user) {
+                                sendMessage(MessageType.ERROR, { message: "Invalid user!" })
+                                return;
+                            }
+
+                            
+
+                            this.db.deleteChat(chatID);
                         }
                     }
                 } catch (error) {
