@@ -1,4 +1,4 @@
-import { ChatType, Database, DMChat, GroupChat, GroupChatUser, InviteStatus, Message, MessageKey, Profile, Session, User } from "./database";
+import { Chat, ChatType, Database, DMChat, GroupChat, GroupChatUser, InviteStatus, Message, MessageKey, Profile, Session, User } from "./database";
 import { ErrorTypeToClient } from "../core/errors";
 import { MessageTypeToClient, MessageTypeToServer } from "../core/events";
 
@@ -172,6 +172,42 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
         return session;
     }
 
+    function checkIfUserIsAdmin(chat: Chat, user: User): Boolean {
+        if(chat instanceof DMChat) return true;
+
+        if(chat instanceof GroupChat) {
+            const participant = chat.users.find(u => u.username === user.username)
+
+            return participant?.admin ?? false;
+        }
+
+        return false;
+    }
+
+    function getParticipant(chat: GroupChat, user: User): GroupChatUser | null {
+        return chat.users.find(u => u.username === user.username) ?? null
+    }
+
+    function isUserInChat(chat: Chat, user: User): Boolean {
+        if(chat instanceof DMChat) {
+            if(chat.userOne.username === user.username) return true;
+            if(chat.userTwo.username === user.username) return true;
+        }
+
+        if(chat instanceof GroupChat) {
+            const participant = chat.users.find(u => u.username === user.username)
+            return participant !== null;
+        }
+
+        return false;
+    }
+
+    function isMessageInChat(chat: Chat, message: Message): Boolean {
+        const messages = db.getChatMessages(chat.id);
+        const messageInChat = messages.find(m => m.id == message.id);
+        return messageInChat !== null;
+    }
+
     switch (msg.type) {
         case MessageTypeToServer.NONE:
             break;
@@ -326,6 +362,12 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 .map(u => db.getUser(u))
                 .filter(user => user != null);
 
+            let id = crypto.randomUUID();
+
+            while (db.getChat(id) !== null) {
+                id = crypto.randomUUID();
+            }
+
             const chat = new GroupChat(crypto.randomUUID(), name, Date.now(), [user.toGroupChatUser(true), ...parsedUsers.map((u) => u.toGroupChatUser(false))])
 
             db.saveGroupChat(chat);
@@ -349,35 +391,12 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 return;
             }
 
-            let participant;
-
-            if(chat instanceof DMChat) {
-                if(chat.userOne.username === user.username) {
-                    participant = chat.userOne;
-                }
-                if(chat.userTwo.username === user.username) {
-                    participant = chat.userTwo;
-                }
+            if(checkIfUserIsAdmin(chat, user)) {
+                db.deleteChat(chatID);
+                sendMessage({ type: MessageTypeToClient.SUCCESS });
+            } else {
+                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION)
             }
-            if(chat instanceof GroupChat) {
-                participant = chat.users.find(
-                    participant => participant.username === user.username
-                );
-            }
-
-            if (!participant) {
-                sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT);
-                return;
-            }
-
-            if (participant instanceof GroupChatUser && !participant.admin) {
-                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
-                return;
-            }
-
-            db.deleteChat(chatID);
-
-            sendMessage({ type: MessageTypeToClient.SUCCESS });
 
             break;
         }
@@ -401,9 +420,7 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 return;
             }
 
-            const participant = chat.users.find(
-                u => u.username === user.username
-            );
+            const participant = getParticipant(chat, user);
 
             if (!participant) {
                 sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT);
@@ -452,6 +469,11 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
                 return;
             }
+
+            if(!isUserInChat(chat, user)) {
+                sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT);
+                return;
+            }
             
             sendMessage({ type: MessageTypeToClient.SUCCESS, data: chat });
 
@@ -469,6 +491,11 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
             const chat = db.getChat(chatID);
             if (!chat) {
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                return;
+            }
+
+            if(!isUserInChat(chat, user)) {
+                sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT);
                 return;
             }
 
@@ -490,6 +517,11 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
             const chat = db.getChat(chatID);
             if (!chat) {
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                return;
+            }
+
+            if(!isUserInChat(chat, user)) {
+                sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT);
                 return;
             }
 
@@ -522,6 +554,8 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 sendError(ErrorTypeToClient.USER_DOESNT_EXIST);
                 return;
             }
+
+            if(db.getChat())
 
             const dm = new DMChat(crypto.randomUUID(), Date.now(), user, userTwo)
 
