@@ -1,4 +1,4 @@
-import { ChatType, Database, DMChat, GroupChat, Message, Profile, Session, User } from "./database";
+import { ChatType, Database, DMChat, GroupChat, GroupChatUser, InviteStatus, Message, MessageKey, Profile, Session, User } from "./database";
 import { ErrorTypeToClient } from "../core/errors";
 import { MessageTypeToClient, MessageTypeToServer } from "../core/events";
 
@@ -19,14 +19,14 @@ type ChallengeIntent = { intent: "LOGIN" | "DELETE_ACCOUNT" }
 
 type WithInviteID = { inviteID: string }
 
-type ChatEdit = {
+type GroupChatEdit = {
     name: string;
     users: string[];
 }
 
 type MessageEdit = {
     encrypted_data: string;
-    message_keys: string[];
+    message_keys: MessageKey[];
 }
 
 type MessageToServer = | {
@@ -59,20 +59,23 @@ type MessageToServer = | {
     type: MessageTypeToServer.CHAT_DELETE | MessageTypeToServer.CHAT_GET | MessageTypeToServer.CHAT_GET_PARTICIPANTS_KEYS | MessageTypeToServer.CHAT_GET_MESSAGES,
     data: WithChatID & WithSession
 } | {
-    type: MessageTypeToServer.GROUP_CHAT_CREATE | MessageTypeToServer.DM_CREATE,
-    data: ChatEdit & WithSession
+    type: MessageTypeToServer.GROUP_CHAT_CREATE,
+    data: GroupChatEdit & WithSession
 } | {
-    type: MessageTypeToServer.CHAT_EDIT,
-    data: ChatEdit & WithChatID & WithSession
+    type: MessageTypeToServer.GROUP_CHAT_EDIT,
+    data: GroupChatEdit & WithChatID & WithSession
+} | {
+    type: MessageTypeToServer.DM_CREATE,
+    data: WithUsername & WithSession
 } | {
     type: MessageTypeToServer.MESSAGE_CREATE,
-    data: MessageEdit & WithSession
+    data: MessageEdit & WithSession & WithChatID
 } | {
     type: MessageTypeToServer.MESSAGE_DELETE | MessageTypeToServer.MESSAGE_GET,
-    data: WithMessageID & WithSession
+    data: WithMessageID & WithSession & WithChatID
 } | {
     type: MessageTypeToServer.MESSAGE_EDIT,
-    data: MessageEdit & WithMessageID & WithSession
+    data: MessageEdit & WithMessageID & WithSession & WithChatID
 } | {
     type: MessageTypeToServer.PARTICIPANT_INVITE | MessageTypeToServer.PARTICIPANT_REMOVE,
     data: {
@@ -99,16 +102,16 @@ type MessageToClient = | {
     data: ActiveChallenge
 } | {
     type: MessageTypeToClient.CHAT_CREATED,
-    data: ChatEdit
+    data: (GroupChatEdit | WithUsername)
 } | {
     type: MessageTypeToClient.CHAT_DELETED,
     data: WithChatID
 } | {
-    type: MessageTypeToClient.CHAT_EDITED,
-    data: ChatEdit & WithChatID
+    type: MessageTypeToClient.GROUP_CHAT_EDITED,
+    data: GroupChatEdit & WithChatID
 } | {
     type: MessageTypeToClient.MESSAGE_CREATED,
-    data: MessageEdit & WithMessageAuthor & WithUsername
+    data: MessageEdit & WithMessageAuthor & WithUsername & WithChatID
 } | {
     type: MessageTypeToClient.MESSAGE_DELETED,
     data: WithMessageID
@@ -340,24 +343,35 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
 
             const { chatID } = msg.data;
 
-            const chat = db.getGroupChat(chatID);
+            const chat = db.getChat(chatID);
             if (!chat) {
-
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
                 return;
             }
 
-            const participant = chat.users.find(
-                participant => participant.username === user.username
-            );
+            let participant;
+
+            if(chat instanceof DMChat) {
+                if(chat.userOne.username === user.username) {
+                    participant = chat.userOne;
+                }
+                if(chat.userTwo.username === user.username) {
+                    participant = chat.userTwo;
+                }
+            }
+            if(chat instanceof GroupChat) {
+                participant = chat.users.find(
+                    participant => participant.username === user.username
+                );
+            }
 
             if (!participant) {
                 sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT);
                 return;
             }
 
-            if (!participant.admin) {
-                sendError(ErrorTypeToClient.CHAT_NOT_ADMIN);
+            if (participant instanceof GroupChatUser && !participant.admin) {
+                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
                 return;
             }
 
@@ -368,7 +382,7 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
             break;
         }
 
-        case MessageTypeToServer.CHAT_EDIT: {
+        case MessageTypeToServer.GROUP_CHAT_EDIT: {
             if (!user) {
                 sendError(ErrorTypeToClient.MISSING_SESSION_ID);
                 return;
@@ -376,13 +390,13 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
 
             const { name, chatID, users } = msg.data;
 
-            const chat = db.getGroupChat(chatID);
+            const chat = db.getChat(chatID);
             if (!chat) {
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
                 return;
             }
 
-            if (chat.type !== ChatType.GROUP) {
+            if (chat instanceof DMChat) {
                 sendError(ErrorTypeToClient.CHAT_IS_DM);
                 return;
             }
@@ -397,7 +411,7 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
             }
 
             if (!participant.admin) {
-                sendError(ErrorTypeToClient.CHAT_NOT_ADMIN);
+                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
                 return;
             }
 
@@ -418,6 +432,8 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                     );
             }
 
+            db.saveGroupChat(chat);
+
             sendMessage({ type: MessageTypeToClient.SUCCESS });
 
             break;
@@ -431,7 +447,7 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
 
             const { chatID } = msg.data;
 
-            const chat = db.getGroupChat(chatID);
+            const chat = db.getChat(chatID);
             if (!chat) {
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
                 return;
@@ -450,7 +466,7 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
 
             const { chatID } = msg.data;
 
-            const chat = db.getGroupChat(chatID);
+            const chat = db.getChat(chatID);
             if (!chat) {
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
                 return;
@@ -471,29 +487,211 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
 
             const { chatID } = msg.data;
 
-            const chat = db.getOrCreateDM(chatID);
+            const chat = db.getChat(chatID);
             if (!chat) {
                 sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
                 return;
             }
 
-            switch(chat.type) {
-                case ChatType.DM: {
-                    const user_keys = chat.users[0]
+            if(chat instanceof DMChat) {
+                const userKeys = [chat.userOne.publicKey,chat.userTwo.publicKey]
 
-                    sendMessage({ type: MessageTypeToClient.SUCCESS, data: messages });
+                sendMessage({ type: MessageTypeToClient.SUCCESS, data: userKeys });
+            }
 
-                    break;
-                }
+            if(chat instanceof GroupChat) {
+                const userKeys = chat.users.map((u) => u.publicKey)
 
-                case ChatType.GROUP: {
-                    sendMessage({ type: MessageTypeToClient.SUCCESS, data: messages });
-
-                    break;
-                }
+                sendMessage({ type: MessageTypeToClient.SUCCESS, data: userKeys });
             }
             
             break;
+        }
+
+        case MessageTypeToServer.DM_CREATE: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { username } = msg.data;
+
+            const userTwo = db.getUser(username);
+
+            if(!userTwo) {
+                sendError(ErrorTypeToClient.USER_DOESNT_EXIST);
+                return;
+            }
+
+            const dm = new DMChat(crypto.randomUUID(), Date.now(), user, userTwo)
+
+            db.saveDM(dm);
+
+            sendMessage({ type: MessageTypeToClient.SUCCESS, data: dm });
+            
+            break;
+        }
+
+        case MessageTypeToServer.INVITE_ACCEPT: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { inviteID } = msg.data
+
+            const invite = db.getInvite(inviteID);
+
+            if(!invite) {
+                sendError(ErrorTypeToClient.INVITE_DOESNT_EXIST)
+                return;
+            }
+
+            if(invite.receiverUsername === user.username) {
+                const chat = db.getChat(invite.chatId);
+                
+                if(!chat) {
+                    sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                    return;
+                }
+
+                if(chat instanceof DMChat) {
+                    sendError(ErrorTypeToClient.CHAT_IS_DM);
+                    return;
+                }
+
+                chat.users.push(user.toGroupChatUser(false));
+                invite.status = InviteStatus.ACCEPTED;
+
+                db.saveGroupChat(chat);
+                db.saveInvite(invite);
+
+                sendMessage({ type: MessageTypeToClient.SUCCESS })
+            } else {
+                sendError(ErrorTypeToClient.USER_ISNT_RECEIVING_INVITE);
+                return;
+            }
+            
+            break;
+        }
+
+        case MessageTypeToServer.INVITE_DECLINE: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { inviteID } = msg.data
+
+            const invite = db.getInvite(inviteID);
+
+            if(!invite) {
+                sendError(ErrorTypeToClient.INVITE_DOESNT_EXIST)
+                return;
+            }
+
+            if(invite.receiverUsername === user.username) {
+                invite.status = InviteStatus.DECLINED;
+
+                db.saveInvite(invite);
+
+                sendMessage({ type: MessageTypeToClient.SUCCESS })
+            } else {
+                sendError(ErrorTypeToClient.USER_ISNT_RECEIVING_INVITE);
+                return;
+            }
+            
+            break;
+        }
+
+        case MessageTypeToServer.INVITE_GET: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { inviteID } = msg.data
+
+            const invite = db.getInvite(inviteID);
+
+            if(!invite) {
+                sendError(ErrorTypeToClient.INVITE_DOESNT_EXIST)
+                return;
+            }
+
+            if(invite.receiverUsername === user.username) {
+                sendMessage({ type: MessageTypeToClient.SUCCESS, data: invite })
+            } else {
+                sendError(ErrorTypeToClient.USER_ISNT_RECEIVING_INVITE);
+                return;
+            }
+            
+            break;
+        }
+
+        case MessageTypeToServer.MESSAGE_CREATE: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { encrypted_data, message_keys, chatID } = msg.data
+
+            const message = new Message(crypto.randomUUID(), user, encrypted_data, Date.now(), message_keys);
+
+            const chat = db.getChat(chatID)
+
+            if(!chat) {
+                sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                return;
+            }
+
+            db.saveMessage(chatID, message);
+
+            sendMessage({ type: MessageTypeToClient.SUCCESS, data: message })
+            
+            break;
+        }
+
+        case MessageTypeToServer.MESSAGE_DELETE: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { messageID, chatID } = msg.data;
+
+            const chat = db.getChat(chatID);
+
+            if(!chat) {
+                sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                return;
+            }
+
+            const chatMessages = db.getChatMessages(chatID);
+
+            const message = chatMessages.find((m) => m.id === messageID);
+
+            if(!message) {
+                sendError(ErrorTypeToClient.MESSAGE_DOESNT_EXIST)
+                return;
+            }
+
+            if(message.author.username !== user.username && ) {
+                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
+                return;
+            }
+
+            db.deleteMessage(messageID);
+
+            sendMessage({ type: MessageTypeToClient.SUCCESS });
+        }
+
+        case MessageTypeToServer.MESSAGE_EDIT: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
         }
     }
 }

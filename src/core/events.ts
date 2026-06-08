@@ -7,7 +7,8 @@ export enum MessageTypeToClient {
 
     CHAT_CREATED,
     CHAT_DELETED,
-    CHAT_EDITED,
+    
+    GROUP_CHAT_EDITED,
 
     PARTICIPANT_INVITED,
     PARTICIPANT_UNINVITED,
@@ -36,8 +37,8 @@ export enum MessageTypeToServer {
     DM_CREATE,
 
     GROUP_CHAT_CREATE,
+    GROUP_CHAT_EDIT,
 
-    CHAT_EDIT,
     CHAT_GET,
     CHAT_GET_PARTICIPANTS_KEYS,
     CHAT_DELETE,
