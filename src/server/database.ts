@@ -141,8 +141,6 @@ export class GroupChat extends Chat {
     }
 }
 
-// --- NEW SYSTEM CLASSES ---
-
 export class Invite {
     id: string;
     chatId: string;
@@ -191,7 +189,6 @@ export class Database {
     private getSessionByIDStmt!: libsql.Statement;
     private deleteSessionStmt!: libsql.Statement;
 
-    // New Prepared Statements
     private saveInviteStmt!: libsql.Statement;
     private getInviteStmt!: libsql.Statement;
     private getInvitesForUserStmt!: libsql.Statement;
@@ -202,6 +199,10 @@ export class Database {
     private getSettingStmt!: libsql.Statement;
     private getAllSettingsStmt!: libsql.Statement;
     private deleteSettingStmt!: libsql.Statement;
+
+    // Added explicit internal verification updates
+    private deleteDMStmt!: libsql.Statement;
+    private deleteGroupChatStmt!: libsql.Statement;
 
     constructor(url: string) {
         this.db = new libsql.Database(url);
@@ -265,13 +266,12 @@ export class Database {
                 FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
             );
 
-            /* --- NEW TABLES --- */
             CREATE TABLE IF NOT EXISTS chat_invites (
                 id TEXT PRIMARY KEY,
                 chat_id TEXT NOT NULL,
                 receiver_username TEXT NOT NULL,
                 sender_username TEXT NOT NULL,
-                status INTEGER NOT NULL DEFAULT 0, -- 0: Pending, 1: Accepted, 2: Declined
+                status INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(receiver_username) REFERENCES users(username) ON DELETE CASCADE,
                 FOREIGN KEY(sender_username) REFERENCES users(username) ON DELETE CASCADE
@@ -280,7 +280,7 @@ export class Database {
             CREATE TABLE IF NOT EXISTS user_settings (
                 username TEXT NOT NULL,
                 setting_key TEXT NOT NULL,
-                setting_value TEXT NOT NULL, -- Stored as dynamic strings or JSON strings
+                setting_value TEXT NOT NULL,
                 PRIMARY KEY(username, setting_key),
                 FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
             );
@@ -316,6 +316,7 @@ export class Database {
             JOIN group_chat_participants gcp ON u.username = gcp.username
             WHERE gcp.group_chat_id = ?
         `);
+        this.deleteGroupChatStmt = this.db.prepare("DELETE FROM group_chats WHERE id = ?");
 
         // DMs
         this.saveDMStmt = this.db.prepare(`
@@ -323,6 +324,7 @@ export class Database {
             ON CONFLICT(id) DO NOTHING
         `);
         this.getDMStmt = this.db.prepare("SELECT * FROM dms WHERE id = ?");
+        this.deleteDMStmt = this.db.prepare("DELETE FROM dms WHERE id = ?");
 
         // Feeds
         this.getGroupChatsForUserStmt = this.db.prepare(`
@@ -344,7 +346,6 @@ export class Database {
             ON CONFLICT(message_id, username) DO UPDATE SET encrypted_key = excluded.encrypted_key
         `);
         this.getMessageStmt = this.db.prepare("SELECT * FROM messages WHERE id = ?");
-        
         this.getMessageKeysStmt = this.db.prepare(`
             SELECT mk.encrypted_key, u.* FROM message_keys mk
             JOIN users u ON mk.username = u.username
@@ -367,7 +368,6 @@ export class Database {
         this.getSessionByIDStmt = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
         this.deleteSessionStmt = this.db.prepare("DELETE FROM sessions WHERE session_id = ?");
 
-        /* --- NEW PREPARED STATEMENTS --- */
         // Invites
         this.saveInviteStmt = this.db.prepare(`
             INSERT INTO chat_invites (id, chat_id, receiver_username, sender_username, status, created_at)
@@ -393,7 +393,7 @@ export class Database {
     /* --- Session Handling --- */
     saveSession(session: Session) { this.saveSessionStmt.run(session.session_id, session.username); }
     getSessionsByUsername(username: string): Session[] {
-        const rows = this.getSessionsForUserStmt.all(username) as unknown as any[];
+        const rows = this.getSessionsForUserStmt.all(username) as any[];
         return rows.map(r => new Session(r.session_id, r.username));
     }
     getSessionsByID(id: string): Session | null {
@@ -423,31 +423,45 @@ export class Database {
         }
     }
 
-    getGroupChat(chatId: string): GroupChat | null {
-        const r = this.getGroupChatStmt.get(chatId) as any;
-        if (!r) return null;
-        const uRows = this.getGroupChatUsersStmt.all(chatId) as unknown as any[];
-        const users = uRows.map(u => new GroupChatUser(new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), u.username, u.public_key, [], u.admin === 1));
-        return new GroupChat(r.id, r.name, r.created_at, users);
-    }
-
     /* --- DM Handling --- */
-    getOrCreateDM(myUsername: string, theirUsername: string): string {
-        const usersSorted = [myUsername, theirUsername].sort();
-        const chatId = `dm_${usersSorted[0]}_${usersSorted[1]}`;
-        this.saveDMStmt.run(chatId, usersSorted[0], usersSorted[1], Date.now());
-        return chatId;
+    saveDM(chat: DMChat) {
+        this.saveUser(chat.userOne);
+        this.saveUser(chat.userTwo);
+        this.saveDMStmt.run(chat.id, chat.userOne.username, chat.userTwo.username, chat.created_at);
     }
 
-    getDM(chatId: string): DMChat | null {
-        const r = this.getDMStmt.get(chatId) as any;
-        if (!r) return null;
-        
-        const u1 = this.getUser(r.user_one);
-        const u2 = this.getUser(r.user_two);
-        if (!u1 || !u2) return null;
+    /* --- Combined Unified Methods --- */
+    getChat(chatId: string): DMChat | GroupChat | null {
+        // First check DM structure table
+        const dmRow = this.getDMStmt.get(chatId) as any;
+        if (dmRow) {
+            const u1 = this.getUser(dmRow.user_one);
+            const u2 = this.getUser(dmRow.user_two);
+            if (!u1 || !u2) return null;
+            return new DMChat(dmRow.id, dmRow.created_at, u1, u2);
+        }
 
-        return new DMChat(r.id, r.created_at, u1, u2);
+        // Check Group Chat structure table
+        const groupRow = this.getGroupChatStmt.get(chatId) as any;
+        if (groupRow) {
+            const uRows = this.getGroupChatUsersStmt.all(chatId) as any[];
+            const users = uRows.map(u => new GroupChatUser(
+                new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), 
+                u.username, 
+                u.public_key, 
+                this.getSessionsByUsername(u.username), 
+                u.admin === 1
+            ));
+            return new GroupChat(groupRow.id, groupRow.name, groupRow.created_at, users);
+        }
+
+        return null;
+    }
+
+    deleteChat(chatId: string) {
+        // Cascade triggers clear linked message details from both structures
+        this.deleteDMStmt.run(chatId);
+        this.deleteGroupChatStmt.run(chatId);
     }
 
     /* --- Combined Feeds Hook --- */
@@ -455,15 +469,15 @@ export class Database {
         const chats: Chat[] = [];
         
         // Fetch groups
-        const groupRows = this.getGroupChatsForUserStmt.all(username) as unknown as any[];
+        const groupRows = this.getGroupChatsForUserStmt.all(username) as any[];
         groupRows.forEach(g => {
-            const uRows = this.getGroupChatUsersStmt.all(g.id) as unknown as any[];
+            const uRows = this.getGroupChatUsersStmt.all(g.id) as any[];
             const users = uRows.map(u => new GroupChatUser(new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), u.username, u.public_key, u.username === username ? this.getSessionsByUsername(u.username) : [], u.admin === 1));
             chats.push(new GroupChat(g.id, g.name, g.created_at, users));
         });
 
         // Fetch DMs
-        const dmRows = this.getDMsForUserStmt.all(username, username) as unknown as any[];
+        const dmRows = this.getDMsForUserStmt.all(username, username) as any[];
         dmRows.forEach(d => {
             const u1 = this.getUser(d.user_one);
             const u2 = this.getUser(d.user_two);
@@ -475,14 +489,6 @@ export class Database {
         });
 
         return chats.sort((a, b) => b.created_at - a.created_at);
-    }
-
-    deleteChat(chatId: string) {
-        if (chatId.startsWith("dm_")) {
-            this.db.prepare("DELETE FROM dms WHERE id = ?").run(chatId);
-        } else {
-            this.db.prepare("DELETE FROM group_chats WHERE id = ?").run(chatId);
-        }
     }
 
     /* --- Message Handling --- */
@@ -501,16 +507,16 @@ export class Database {
         const a = this.getUser(m.author);
         if (!a) return null;
 
-        const kRows = this.getMessageKeysStmt.all(messageId) as unknown as any[];
+        const kRows = this.getMessageKeysStmt.all(messageId) as any[];
         const messageKeys = kRows.map(k => new MessageKey(k.encrypted_key, new User(new Profile(k.display_name || "", k.profile_image_url || "", k.bio || ""), k.username, k.public_key, [])));
         return new Message(m.id, a, m.encrypted_data, m.created_at, messageKeys);
     }
 
     getChatMessages(chatId: string): Message[] {
-        const rows = this.getChatMessagesStmt.all(chatId) as unknown as any[];
+        const rows = this.getChatMessagesStmt.all(chatId) as any[];
         return rows.map(row => {
             const author = new User(new Profile(row.display_name || "", row.profile_image_url || "", row.bio || ""), row.username, row.public_key, []);
-            const kRows = this.getMessageKeysStmt.all(row.message_id) as unknown as any[];
+            const kRows = this.getMessageKeysStmt.all(row.message_id) as any[];
             const messageKeys = kRows.map(k => new MessageKey(k.encrypted_key, new User(new Profile(k.display_name || "", k.profile_image_url || "", k.bio || ""), k.username, k.public_key, [])));
             return new Message(row.message_id, author, row.encrypted_data, row.created_at, messageKeys);
         });
@@ -518,7 +524,7 @@ export class Database {
 
     deleteMessage(messageId: string) { this.deleteMessageStmt.run(messageId); }
 
-    /* --- NEW: Invite Handling --- */
+    /* --- Invite Handling --- */
     saveInvite(invite: Invite) {
         this.saveInviteStmt.run(invite.id, invite.chatId, invite.receiverUsername, invite.senderUsername, invite.status, invite.createdAt);
     }
@@ -530,7 +536,7 @@ export class Database {
     }
 
     getInvitesForUser(username: string): Invite[] {
-        const rows = this.getInvitesForUserStmt.all(username) as unknown as any[];
+        const rows = this.getInvitesForUserStmt.all(username) as any[];
         return rows.map(r => new Invite(r.id, r.chat_id, r.receiver_username, r.sender_username, r.status, r.created_at));
     }
 
@@ -542,34 +548,24 @@ export class Database {
         this.deleteInviteStmt.run(inviteId);
     }
 
-    /* --- NEW: Dynamic User Settings Handling --- */
-    
-    /**
-     * Store any value securely. Converts objects/arrays/booleans/numbers cleanly into JSON strings.
-     */
+    /* --- Dynamic User Settings Handling --- */
     setSetting(username: string, key: string, value: any) {
         const valueToString = typeof value === "object" ? JSON.stringify(value) : String(value);
         this.saveSettingStmt.run(username, key, valueToString);
     }
 
-    /**
-     * Retrieve settings dynamically. Automatically attempts to safely parse JSON strings back into structures.
-     */
     getSetting<T = any>(username: string, key: string): T | null {
         const r = this.getSettingStmt.get(username, key) as any;
         if (!r) return null;
         try {
             return JSON.parse(r.setting_value) as T;
         } catch {
-            return r.setting_value as unknown as T; // Return fallback scalar string
+            return r.setting_value as unknown as T;
         }
     }
 
-    /**
-     * Get all custom settings for a user converted into a dynamic JS object mapping
-     */
     getAllSettings(username: string): Record<string, any> {
-        const rows = this.getAllSettingsStmt.all(username) as unknown as any[];
+        const rows = this.getAllSettingsStmt.all(username) as any[];
         const settingsMap: Record<string, any> = {};
         rows.forEach(r => {
             try {
