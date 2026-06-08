@@ -1,7 +1,9 @@
 import { Config, defaultConfig } from "./config";
-import WebSocket, { WebSocketServer } from "ws";
-import { Chat, ChatType, Database, GroupChat, GroupChatUser, Profile, Session, User } from "./database.js";
-import * as crypto from "crypto"
+import { WebSocketServer } from "ws";
+import { Database } from "./database.js";
+import { MessageTypeToClient, MessageTypeToServer } from "../core/events.js";
+import { serverHandleMessage } from "./messageHandler.js";
+import { ErrorTypeToClient } from "../core/errors.js";
 
 export class Server {
     wss: WebSocketServer;
@@ -22,10 +24,6 @@ export class Server {
         })
 
         server.on("connection", (socket, req)=>{
-            function sendMessage(type: MessageType = MessageType.NONE, data: Object = {}) {
-                socket.send(JSON.stringify({ t: type, d: data }));
-            }
-
             const timestamp = Date.now();
 
             let heartbeatTime = timestamp
@@ -33,15 +31,15 @@ export class Server {
             socket.on("message", (rawMessage) => {
                 try {
                     const parsed = JSON.parse(rawMessage.toString());
-                    const type = parsed.t as MessageType;
-                    const data = parsed.d;
 
-                    if (typeof type !== "number") throw new Error("Invalid message type format");
                     heartbeatTime = Date.now();
 
-                    
+                    serverHandleMessage(socket, this.db, parsed)
                 } catch (error) {
-                    sendMessage(MessageType.ERROR, { message: "Malformed payload or internal processing error." });
+                    socket.send(JSON.stringify({
+                        t: MessageTypeToClient.ERROR, 
+                        d: ErrorTypeToClient.INTERNAL_ERROR
+                    }));
                 }
             });
 

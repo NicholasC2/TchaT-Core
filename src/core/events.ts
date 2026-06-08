@@ -33,7 +33,10 @@ export enum MessageTypeToServer {
     ACCOUNT_GET_INVITES,
     USER_GET_INFO,
 
-    CHAT_CREATE,
+    DM_CREATE,
+
+    GROUP_CHAT_CREATE,
+
     CHAT_EDIT,
     CHAT_GET,
     CHAT_GET_PARTICIPANTS_KEYS,

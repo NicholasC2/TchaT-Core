@@ -3,8 +3,19 @@ export enum ErrorTypeToClient {
     USER_DOESNT_EXIST,
 
     SESSION_INVALID,
+
     CHALLENGE_EXPIRED,
-    CHALLENGE_FAILED
+    CHALLENGE_FAILED,
+
+    INTERNAL_ERROR,
+
+    ACCOUNT_DELETED,
+    MISSING_SESSION_ID,
+
+    CHAT_DOESNT_EXIST,
+    CHAT_NOT_PARTICIPANT,
+    CHAT_NOT_ADMIN,
+    CHAT_IS_DM,
 }
 
 export enum ErrorTypeToServer {
