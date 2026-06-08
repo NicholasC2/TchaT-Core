@@ -5,6 +5,12 @@ export enum ChatType {
     GROUP = 1
 }
 
+export enum InviteStatus {
+    PENDING = 0,
+    ACCEPTED = 1,
+    DECLINED = 2
+}
+
 export class Profile {
     displayName: string = "";
     profileImageURL: string = "";
@@ -135,6 +141,26 @@ export class GroupChat extends Chat {
     }
 }
 
+// --- NEW SYSTEM CLASSES ---
+
+export class Invite {
+    id: string;
+    chatId: string;
+    receiverUsername: string;
+    senderUsername: string;
+    status: InviteStatus;
+    createdAt: number;
+
+    constructor(id: string, chatId: string, receiverUsername: string, senderUsername: string, status: InviteStatus, createdAt: number) {
+        this.id = id;
+        this.chatId = chatId;
+        this.receiverUsername = receiverUsername;
+        this.senderUsername = senderUsername;
+        this.status = status;
+        this.createdAt = createdAt;
+    }
+}
+
 export class Database {
     db: libsql.Database;
 
@@ -164,6 +190,18 @@ export class Database {
     private getSessionsForUserStmt!: libsql.Statement;
     private getSessionByIDStmt!: libsql.Statement;
     private deleteSessionStmt!: libsql.Statement;
+
+    // New Prepared Statements
+    private saveInviteStmt!: libsql.Statement;
+    private getInviteStmt!: libsql.Statement;
+    private getInvitesForUserStmt!: libsql.Statement;
+    private updateInviteStatusStmt!: libsql.Statement;
+    private deleteInviteStmt!: libsql.Statement;
+
+    private saveSettingStmt!: libsql.Statement;
+    private getSettingStmt!: libsql.Statement;
+    private getAllSettingsStmt!: libsql.Statement;
+    private deleteSettingStmt!: libsql.Statement;
 
     constructor(url: string) {
         this.db = new libsql.Database(url);
@@ -224,6 +262,26 @@ export class Database {
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
+                FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+            );
+
+            /* --- NEW TABLES --- */
+            CREATE TABLE IF NOT EXISTS chat_invites (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                receiver_username TEXT NOT NULL,
+                sender_username TEXT NOT NULL,
+                status INTEGER NOT NULL DEFAULT 0, -- 0: Pending, 1: Accepted, 2: Declined
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(receiver_username) REFERENCES users(username) ON DELETE CASCADE,
+                FOREIGN KEY(sender_username) REFERENCES users(username) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS user_settings (
+                username TEXT NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT NOT NULL, -- Stored as dynamic strings or JSON strings
+                PRIMARY KEY(username, setting_key),
                 FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
             );
         `);
@@ -308,6 +366,28 @@ export class Database {
         this.getSessionsForUserStmt = this.db.prepare("SELECT * FROM sessions WHERE username = ?");
         this.getSessionByIDStmt = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
         this.deleteSessionStmt = this.db.prepare("DELETE FROM sessions WHERE session_id = ?");
+
+        /* --- NEW PREPARED STATEMENTS --- */
+        // Invites
+        this.saveInviteStmt = this.db.prepare(`
+            INSERT INTO chat_invites (id, chat_id, receiver_username, sender_username, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET status = excluded.status
+        `);
+        this.getInviteStmt = this.db.prepare("SELECT * FROM chat_invites WHERE id = ?");
+        this.getInvitesForUserStmt = this.db.prepare("SELECT * FROM chat_invites WHERE receiver_username = ? ORDER BY created_at DESC");
+        this.updateInviteStatusStmt = this.db.prepare("UPDATE chat_invites SET status = ? WHERE id = ?");
+        this.deleteInviteStmt = this.db.prepare("DELETE FROM chat_invites WHERE id = ?");
+
+        // Dynamic Settings
+        this.saveSettingStmt = this.db.prepare(`
+            INSERT INTO user_settings (username, setting_key, setting_value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(username, setting_key) DO UPDATE SET setting_value = excluded.setting_value
+        `);
+        this.getSettingStmt = this.db.prepare("SELECT setting_value FROM user_settings WHERE username = ? AND setting_key = ?");
+        this.getAllSettingsStmt = this.db.prepare("SELECT setting_key, setting_value FROM user_settings WHERE username = ?");
+        this.deleteSettingStmt = this.db.prepare("DELETE FROM user_settings WHERE username = ? AND setting_key = ?");
     }
 
     /* --- Session Handling --- */
@@ -437,4 +517,71 @@ export class Database {
     }
 
     deleteMessage(messageId: string) { this.deleteMessageStmt.run(messageId); }
+
+    /* --- NEW: Invite Handling --- */
+    saveInvite(invite: Invite) {
+        this.saveInviteStmt.run(invite.id, invite.chatId, invite.receiverUsername, invite.senderUsername, invite.status, invite.createdAt);
+    }
+
+    getInvite(inviteId: string): Invite | null {
+        const r = this.getInviteStmt.get(inviteId) as any;
+        if (!r) return null;
+        return new Invite(r.id, r.chat_id, r.receiver_username, r.sender_username, r.status, r.created_at);
+    }
+
+    getInvitesForUser(username: string): Invite[] {
+        const rows = this.getInvitesForUserStmt.all(username) as unknown as any[];
+        return rows.map(r => new Invite(r.id, r.chat_id, r.receiver_username, r.sender_username, r.status, r.created_at));
+    }
+
+    updateInviteStatus(inviteId: string, status: InviteStatus) {
+        this.updateInviteStatusStmt.run(status, inviteId);
+    }
+
+    deleteInvite(inviteId: string) {
+        this.deleteInviteStmt.run(inviteId);
+    }
+
+    /* --- NEW: Dynamic User Settings Handling --- */
+    
+    /**
+     * Store any value securely. Converts objects/arrays/booleans/numbers cleanly into JSON strings.
+     */
+    setSetting(username: string, key: string, value: any) {
+        const valueToString = typeof value === "object" ? JSON.stringify(value) : String(value);
+        this.saveSettingStmt.run(username, key, valueToString);
+    }
+
+    /**
+     * Retrieve settings dynamically. Automatically attempts to safely parse JSON strings back into structures.
+     */
+    getSetting<T = any>(username: string, key: string): T | null {
+        const r = this.getSettingStmt.get(username, key) as any;
+        if (!r) return null;
+        try {
+            return JSON.parse(r.setting_value) as T;
+        } catch {
+            return r.setting_value as unknown as T; // Return fallback scalar string
+        }
+    }
+
+    /**
+     * Get all custom settings for a user converted into a dynamic JS object mapping
+     */
+    getAllSettings(username: string): Record<string, any> {
+        const rows = this.getAllSettingsStmt.all(username) as unknown as any[];
+        const settingsMap: Record<string, any> = {};
+        rows.forEach(r => {
+            try {
+                settingsMap[r.setting_key] = JSON.parse(r.setting_value);
+            } catch {
+                settingsMap[r.setting_key] = r.setting_value;
+            }
+        });
+        return settingsMap;
+    }
+
+    deleteSetting(username: string, key: string) {
+        this.deleteSettingStmt.run(username, key);
+    }
 }

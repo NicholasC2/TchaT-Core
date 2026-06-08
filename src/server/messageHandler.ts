@@ -1,48 +1,97 @@
-import { Database, Profile, Session, User } from "../server/database";
-import { ErrorTypeToClient } from "./errors";
-import { MessageTypeToClient, MessageTypeToServer } from "./events";
+import { Database, DMChat, GroupChat, Message, Profile, Session, User } from "./database";
+import { ErrorTypeToClient } from "../core/errors";
+import { MessageTypeToClient, MessageTypeToServer } from "../core/events";
 
 import * as crypto from "crypto"
 
 type WithSession = { sessionID: string };
 
+type WithChatID = { chatID: string }
+
+type WithUsername = { username: string }
+
+type WithMessageID = { messageID: string }
+
+type WithMessageAuthor = { author: string }
+
 type ChallengeIntent = { intent: "LOGIN" | "DELETE_ACCOUNT" }
 
-type MessageToServer =
-  | {
-      type: MessageTypeToServer.NONE;
-      data?: undefined;
-    }
-  | {
-      type: MessageTypeToServer.ACCOUNT_CREATE;
-      data: {
+type WithInviteID = { inviteID: string }
+
+type ChatEdit = {
+    name: string;
+    users: string[];
+}
+
+type MessageEdit = {
+    encrypted_data: string;
+    message_keys: string[];
+}
+
+type MessageToServer = | {
+    type: MessageTypeToServer.NONE,
+    data?: undefined
+} | {
+    type: MessageTypeToServer.ACCOUNT_CREATE;
+    data: {
         username: string;
         publicKey: string;
         profileInfo: {
-          displayName: string;
-          profileImageURL: string;
-          bio: string;
+            displayName: string;
+            profileImageURL: string;
+            bio: string;
         };
-      };
-    }
-  | {
-      type: MessageTypeToServer.ACCOUNT_GET_CHATS;
-      data: WithSession;
-    }
-  | {
-      type: MessageTypeToServer.ACCOUNT_GET_SETTINGS;
-      data: WithSession;
-    }
-  | {
-      type: MessageTypeToServer.CHALLENGE_REQUEST;
-      data: { username: string } & WithSession & ChallengeIntent; 
-    }
-  | {
-      type: MessageTypeToServer.CHALLENGE_VERIFY_AND_EXECUTE,
-      data: { username: string, signatureHex: string }
-    }
+    };
+} | {
+    type: MessageTypeToServer.ACCOUNT_GET_CHATS | MessageTypeToServer.ACCOUNT_GET_SETTINGS | MessageTypeToServer.ACCOUNT_GET_INVITES;
+    data: WithSession;
+} | {
+    type: MessageTypeToServer.ACCOUNT_SET_SETTING;
+    data: { key: string; value: any } & WithSession;
+} | {
+    type: MessageTypeToServer.CHALLENGE_REQUEST;
+    data: ChallengeIntent & WithUsername; 
+} | {
+    type: MessageTypeToServer.CHALLENGE_VERIFY_AND_EXECUTE,
+    data: { signatureHex: string } & WithUsername 
+} | {
+    type: MessageTypeToServer.CHAT_DELETE |
+          MessageTypeToServer.CHAT_GET |
+          MessageTypeToServer.CHAT_GET_PARTICIPANTS_KEYS |
+          MessageTypeToServer.CHAT_GET_MESSAGES,
 
-type MessageToClient = {
+    data: WithChatID & WithSession
+} | {
+    type: MessageTypeToServer.CHAT_CREATE,
+    data: ChatEdit & WithSession
+} | {
+    type: MessageTypeToServer.CHAT_EDIT,
+    data: ChatEdit & WithChatID & WithSession
+} | {
+    type: MessageTypeToServer.MESSAGE_CREATE,
+    data: MessageEdit & WithSession
+} | {
+    type: MessageTypeToServer.MESSAGE_DELETE | MessageTypeToServer.MESSAGE_GET,
+    data: WithMessageID & WithSession
+} | {
+    type: MessageTypeToServer.MESSAGE_EDIT,
+    data: MessageEdit & WithMessageID & WithSession
+} | {
+    type: MessageTypeToServer.PARTICIPANT_INVITE | MessageTypeToServer.PARTICIPANT_REMOVE,
+    data: {
+        user: string;
+    } & WithChatID & WithSession
+} | {
+    type: MessageTypeToServer.PARTICIPANT_UNINVITE | MessageTypeToServer.INVITE_DECLINE | MessageTypeToServer.INVITE_ACCEPT | MessageTypeToServer.INVITE_GET,
+    data: WithInviteID & WithSession
+} | {
+    type: MessageTypeToServer.USER_GET_INFO,
+    data: {
+        user: string;
+    } & WithSession
+}
+
+type MessageToClient = | {
     type: MessageTypeToClient.SUCCESS,
     data?: Object
 } | {
@@ -51,6 +100,32 @@ type MessageToClient = {
 } | {
     type: MessageTypeToClient.CHALLENGE_ISSUED,
     data: ActiveChallenge
+} | {
+    type: MessageTypeToClient.CHAT_CREATED,
+    data: ChatEdit
+} | {
+    type: MessageTypeToClient.CHAT_DELETED,
+    data: WithChatID
+} | {
+    type: MessageTypeToClient.CHAT_EDITED,
+    data: ChatEdit & WithChatID
+} | {
+    type: MessageTypeToClient.MESSAGE_CREATED,
+    data: MessageEdit & WithMessageAuthor & WithUsername
+} | {
+    type: MessageTypeToClient.MESSAGE_DELETED,
+    data: WithMessageID
+} | {
+    type: MessageTypeToClient.MESSAGE_EDITED,
+    data: MessageEdit & WithMessageID & WithUsername
+} | {
+    type: MessageTypeToClient.PARTICIPANT_INVITED | MessageTypeToClient.PARTICIPANT_INVITE_ACCEPTED | MessageTypeToClient.PARTICIPANT_INVITE_DECLINED | MessageTypeToClient.PARTICIPANT_UNINVITED,
+    data: WithInviteID
+} | {
+    type: MessageTypeToClient.PARTICIPANT_REMOVED,
+    data: WithChatID & WithUsername
+} | {
+    type: MessageTypeToClient.TYPE_NOT_IMPLEMENTED;
 }
 
 interface ActiveChallenge {
@@ -61,6 +136,7 @@ interface ActiveChallenge {
 const challengeMap = new Map<string, ActiveChallenge>();
 
 function serverHandleMessage(socket: WebSocket, db: Database, msg: MessageToServer) {
+
     function sendMessage(msg: MessageToClient) {
         socket.send(JSON.stringify(msg))
         return;
@@ -69,6 +145,13 @@ function serverHandleMessage(socket: WebSocket, db: Database, msg: MessageToServ
     function sendError(type: ErrorTypeToClient) {
         sendMessage({ type: MessageTypeToClient.ERROR, data: type});
     }
+
+    
+
+    if(!!msg.data && "sessionID" in msg.data) {
+        
+    }
+
 
     switch (msg.type) {
         case MessageTypeToServer.NONE:
@@ -162,7 +245,7 @@ function serverHandleMessage(socket: WebSocket, db: Database, msg: MessageToServ
             break;
         }
 
-        case MessageType.ACCOUNT_GET_CHATS: {
+        case MessageTypeToServer.ACCOUNT_GET_CHATS: {
             const { sessionID } = data;
 
             const session = this.db.getSessionsByID(sessionID);
