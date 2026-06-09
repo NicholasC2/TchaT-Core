@@ -46,15 +46,11 @@ export class User {
         this.sessions = sessions;
     }
 
-    /**
-     * Converts a base User instance into a GroupChatUser instance.
-     */
     toGroupChatUser(admin: boolean = false): GroupChatUser {
         return new GroupChatUser(
             this.profileInfo,
             this.username,
             this.publicKey,
-            this.sessions,
             admin
         );
     }
@@ -89,21 +85,9 @@ export class Message {
 export class GroupChatUser extends User {
     admin: boolean = false;
 
-    constructor(profileInfo: Profile, username: string, publicKey: string, sessions: Session[] = [], admin: boolean = false) {
-        super(profileInfo, username, publicKey, sessions);
+    constructor(profileInfo: Profile, username: string, publicKey: string, admin: boolean = false) {
+        super(profileInfo, username, publicKey, []);
         this.admin = admin;
-    }
-
-    /**
-     * Converts a GroupChatUser instance back into a clean base User instance.
-     */
-    toUser(): User {
-        return new User(
-            this.profileInfo,
-            this.username,
-            this.publicKey,
-            this.sessions
-        );
     }
 }
 
@@ -442,11 +426,11 @@ export class Database {
         const groupRow = this.getGroupChatStmt.get(chatId) as unknown as any;
         if (groupRow) {
             const uRows = this.getGroupChatUsersStmt.all(chatId) as unknown as any[];
+            
             const users = uRows.map(u => new GroupChatUser(
                 new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), 
                 u.username, 
-                u.public_key, 
-                this.getSessionsByUsername(u.username), 
+                u.public_key,
                 u.admin === 1
             ));
             return new GroupChat(groupRow.id, groupRow.name, groupRow.created_at, users);
@@ -467,7 +451,13 @@ export class Database {
         const groupRows = this.getGroupChatsForUserStmt.all(username) as unknown as any[];
         groupRows.forEach(g => {
             const uRows = this.getGroupChatUsersStmt.all(g.id) as unknown as any[];
-            const users = uRows.map(u => new GroupChatUser(new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), u.username, u.public_key, u.username === username ? this.getSessionsByUsername(u.username) : [], u.admin === 1));
+            
+            const users = uRows.map(u => new GroupChatUser(
+                new Profile(u.display_name || "", u.profile_image_url || "", u.bio || ""), 
+                u.username, 
+                u.public_key,
+                u.admin === 1
+            ));
             chats.push(new GroupChat(g.id, g.name, g.created_at, users));
         });
 
@@ -476,8 +466,8 @@ export class Database {
             const u1 = this.getUser(d.user_one);
             const u2 = this.getUser(d.user_two);
             if (u1 && u2) {
-                if (u1.username === username) u1.sessions = this.getSessionsByUsername(username);
-                if (u2.username === username) u2.sessions = this.getSessionsByUsername(username);
+                if (u1.username === username) { u1.sessions = this.getSessionsByUsername(username); } else { u1.sessions = []; }
+                if (u2.username === username) { u2.sessions = this.getSessionsByUsername(username); } else { u2.sessions = []; }
                 chats.push(new DMChat(d.id, d.created_at, u1, u2));
             }
         });

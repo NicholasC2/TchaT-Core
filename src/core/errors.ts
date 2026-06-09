@@ -3,6 +3,7 @@ export enum ErrorTypeToClient {
     USER_DOESNT_EXIST,
     USER_ISNT_RECEIVING_INVITE,
     USER_MISSING_PERMISSION,
+    USER_NOT_IN_CHAT,
 
     INVITE_DOESNT_EXIST,
 
@@ -24,6 +25,8 @@ export enum ErrorTypeToClient {
     DM_EXISTS,
 
     MESSAGE_DOESNT_EXIST,
+    
+    TYPE_NOT_IMPLEMENTED,
 }
 
 export enum ErrorTypeToServer {

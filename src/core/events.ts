@@ -1,7 +1,6 @@
 export enum MessageTypeToClient {
     ERROR,
     SUCCESS,
-    TYPE_NOT_IMPLEMENTED,
 
     CHALLENGE_ISSUED,
 
@@ -14,7 +13,6 @@ export enum MessageTypeToClient {
     PARTICIPANT_UNINVITED,
     PARTICIPANT_INVITE_ACCEPTED,
     PARTICIPANT_INVITE_DECLINED,
-    PARTICIPANT_REMOVED,
     
     MESSAGE_CREATED,
     MESSAGE_EDITED,
@@ -46,7 +44,6 @@ export enum MessageTypeToServer {
 
     PARTICIPANT_INVITE,
     PARTICIPANT_UNINVITE,
-    PARTICIPANT_REMOVE,
 
     INVITE_ACCEPT,
     INVITE_GET,
