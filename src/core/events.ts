@@ -17,6 +17,11 @@ export enum MessageTypeToClient {
     MESSAGE_CREATED,
     MESSAGE_EDITED,
     MESSAGE_DELETED,
+    
+    USER_PENDING_U,
+    USER_ACCEPTED_U,
+    USER_UNFRIENDED_U,
+    USER_BLOCKED_U,
 }
 
 export enum MessageTypeToServer {
@@ -53,4 +58,9 @@ export enum MessageTypeToServer {
     MESSAGE_EDIT,
     MESSAGE_DELETE,
     MESSAGE_GET,
+
+    USER_FRIEND_REQUEST,
+    USER_ACCEPT,
+    USER_UNFRIEND,
+    USER_BLOCK,
 }

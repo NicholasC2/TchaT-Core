@@ -1,14 +1,24 @@
 import libsql from "@libsql/sqlite3";
 
 export enum ChatType {
-    DM = 0,
-    GROUP = 1
+    DM,
+    GROUP
 }
 
 export enum InviteStatus {
-    PENDING = 0,
-    ACCEPTED = 1,
-    DECLINED = 2
+    PENDING,
+    ACCEPTED,
+    DECLINED
+}
+
+export enum ConnectionType {
+    NONE,
+    ONE_REQUESTED_TWO,
+    TWO_REQUESTED_ONE,
+    FRIENDS,
+    ONE_BLOCKED_TWO,
+    TWO_BLOCKED_ONE,
+    BOTH_BLOCKED
 }
 
 export class Profile {
@@ -143,6 +153,20 @@ export class Invite {
     }
 }
 
+export class Connection {
+    userOne: string;
+    userTwo: string;
+    type: number;
+    createdAt: number;
+
+    constructor(userOne: string, userTwo: string, type: number, createdAt: number) {
+        this.userOne = userOne;
+        this.userTwo = userTwo;
+        this.createdAt = createdAt;
+        this.type = type;
+    }
+}
+
 export class Database {
     db: libsql.Database;
 
@@ -178,6 +202,12 @@ export class Database {
     private getInvitesForUserStmt!: libsql.Statement;
     private updateInviteStatusStmt!: libsql.Statement;
     private deleteInviteStmt!: libsql.Statement;
+
+    private saveUserConnectionStmt!: libsql.Statement;
+    private getUserConnectionsForUserStmt!: libsql.Statement;
+    private checkConnectionStmt!: libsql.Statement;
+    private deleteUserConnectionStmt!: libsql.Statement;
+    private getRawConnectionStmt!: libsql.Statement;
 
     private saveSettingStmt!: libsql.Statement;
     private getSettingStmt!: libsql.Statement;
@@ -247,6 +277,17 @@ export class Database {
                 session_id TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
                 FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS user_connections (
+                userOne TEXT NOT NULL,
+                userTwo TEXT NOT NULL,
+                type INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(userOne, userTwo),
+                FOREIGN KEY(userOne) REFERENCES users(username) ON DELETE CASCADE,
+                FOREIGN KEY(userTwo) REFERENCES users(username) ON DELETE CASCADE,
+                CHECK(userOne < userTwo) 
             );
 
             CREATE TABLE IF NOT EXISTS chat_invites (
@@ -361,6 +402,28 @@ export class Database {
         this.getInvitesForUserStmt = this.db.prepare("SELECT * FROM chat_invites WHERE receiver_username = ? ORDER BY created_at DESC");
         this.updateInviteStatusStmt = this.db.prepare("UPDATE chat_invites SET status = ? WHERE id = ?");
         this.deleteInviteStmt = this.db.prepare("DELETE FROM chat_invites WHERE id = ?");
+
+        // Connections
+        this.saveUserConnectionStmt = this.db.prepare(`
+            INSERT INTO user_connections (userOne, userTwo, type, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(userOne, userTwo) DO UPDATE SET type = excluded.type
+        `);
+        this.getUserConnectionsForUserStmt = this.db.prepare(`
+            SELECT * FROM user_connections 
+            WHERE userOne = ? OR userTwo = ?
+        `);
+        this.checkConnectionStmt = this.db.prepare(`
+            SELECT COUNT(*) as count FROM user_connections 
+            WHERE userOne = ? AND userTwo = ?
+        `);
+        this.deleteUserConnectionStmt = this.db.prepare(`
+            DELETE FROM user_connections 
+            WHERE userOne = ? AND userTwo = ?
+        `);
+        this.getRawConnectionStmt = this.db.prepare(`
+            SELECT * FROM user_connections WHERE userOne = ? AND userTwo = ?
+        `);
 
         // Dynamic Settings
         this.saveSettingStmt = this.db.prepare(`
@@ -563,5 +626,66 @@ export class Database {
 
     deleteSetting(username: string, key: string) {
         this.deleteSettingStmt.run(username, key);
+    }
+
+    private getCanonicalOrder(u1: string, u2: string): [string, string] {
+        return u1 < u2 ? [u1, u2] : [u2, u1];
+    }
+
+    hasConnection(usernameA: string, usernameB: string): boolean {
+        const [u1, u2] = this.getCanonicalOrder(usernameA, usernameB);
+        const result = this.checkConnectionStmt.get(u1, u2) as any;
+        return result ? result.count > 0 : false;
+    }
+
+    saveConnection(usernameA: string, usernameB: string, type: ConnectionType) {
+        const [u1, u2] = this.getCanonicalOrder(usernameA, usernameB);
+        this.saveUserConnectionStmt.run(u1, u2, type, Date.now());
+    }
+    
+    deleteConnection(usernameA: string, usernameB: string) {
+        const [u1, u2] = this.getCanonicalOrder(usernameA, usernameB);
+        this.deleteUserConnectionStmt.run(u1, u2);
+    }
+    
+    getConnectionsForUser(username: string): Connection[] {
+        const rows = this.getUserConnectionsForUserStmt.all(username) as unknown as any[];
+        return rows.map(r => new Connection(r.userOne, r.userTwo, r.type, r.created_at));
+    }
+
+    getConnectionState(actor: string, target: string): { type: ConnectionType, isInitiator: boolean } {
+        const [u1, u2] = this.getCanonicalOrder(actor, target);
+        const row = this.getRawConnectionStmt.get(u1, u2) as any;
+        if (!row) {
+            return { type: ConnectionType.NONE, isInitiator: false };
+        }
+
+        const actorIsUserOne = actor === u1;
+        let resolvedType = row.type as ConnectionType;
+
+        let isInitiator = false;
+        if (resolvedType === ConnectionType.ONE_REQUESTED_TWO && actorIsUserOne) isInitiator = true;
+        if (resolvedType === ConnectionType.TWO_REQUESTED_ONE && !actorIsUserOne) isInitiator = true;
+        if (resolvedType === ConnectionType.ONE_BLOCKED_TWO && actorIsUserOne) isInitiator = true;
+        if (resolvedType === ConnectionType.TWO_BLOCKED_ONE && !actorIsUserOne) isInitiator = true;
+        if (resolvedType === ConnectionType.FRIENDS) isInitiator = true;
+
+        return { type: resolvedType, isInitiator };
+    }
+
+    getFriends(username: string): User[] {
+        const connections = this.getConnectionsForUser(username);
+        const friendProfiles: User[] = [];
+
+        for (const conn of connections) {
+            if (conn.type === ConnectionType.FRIENDS) {
+                const friendUsername = conn.userOne === username ? conn.userTwo : conn.userOne;
+                const friendUser = this.getUser(friendUsername);
+                if (friendUser) {
+                    friendProfiles.push(friendUser);
+                }
+            }
+        }
+        return friendProfiles;
     }
 }

@@ -1,4 +1,4 @@
-import { Chat, Database, DMChat, GroupChat, GroupChatUser, Invite, InviteStatus, Message, MessageKey, Profile, Session, User } from "./database";
+import { Chat, ConnectionType, Database, DMChat, GroupChat, GroupChatUser, Invite, InviteStatus, Message, MessageKey, Profile, Session, User } from "./database";
 import { ErrorTypeToClient } from "../core/errors";
 import { MessageTypeToClient, MessageTypeToServer } from "../core/events";
 
@@ -60,7 +60,7 @@ type MessageToServer = | {
     type: MessageTypeToServer.GROUP_CHAT_EDIT,
     data: GroupChatEdit & WithChatID & WithSession
 } | {
-    type: MessageTypeToServer.DM_CREATE | MessageTypeToServer.USER_GET_INFO,
+    type: MessageTypeToServer.DM_CREATE | MessageTypeToServer.USER_GET_INFO | MessageTypeToServer.USER_FRIEND_REQUEST | MessageTypeToServer.USER_UNFRIEND | MessageTypeToServer.USER_BLOCK | MessageTypeToServer.USER_ACCEPT,
     data: WithUsername & WithSession
 } | {
     type: MessageTypeToServer.MESSAGE_CREATE,
@@ -109,6 +109,9 @@ type MessageToClient = | {
 } | {
     type: (MessageTypeToClient.PARTICIPANT_INVITED | MessageTypeToClient.PARTICIPANT_INVITE_ACCEPTED | MessageTypeToClient.PARTICIPANT_INVITE_DECLINED | MessageTypeToClient.PARTICIPANT_UNINVITED),
     data: WithInviteID
+} | {
+    type: MessageTypeToClient.USER_BLOCKED_U | MessageTypeToClient.USER_PENDING_U | MessageTypeToClient.USER_UNFRIENDED_U | MessageTypeToClient.USER_ACCEPTED_U,
+    data: WithUsername
 }
 
 interface ActiveChallenge {
@@ -842,6 +845,137 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
             if (!targetUser) return createErrorMessage(ErrorTypeToClient.USER_DOESNT_EXIST);
 
             return { type: MessageTypeToClient.SUCCESS, data: sanitizeUserForClient(targetUser) };
+        }
+
+        case MessageTypeToServer.USER_BLOCK: {
+            if (!user) return createErrorMessage(ErrorTypeToClient.MISSING_SESSION_ID);
+            const { username } = msg.data;
+        
+            const targetUser = db.getUser(username);
+            if (!targetUser) return createErrorMessage(ErrorTypeToClient.USER_DOESNT_EXIST);
+        
+            const connection = db.getConnectionState(user.username, username);
+            const actorIsUserOne = user.username < username;
+        
+            if (connection.type === ConnectionType.BOTH_BLOCKED) {
+                return createErrorMessage(ErrorTypeToClient.USER_BLOCKED);
+            }
+            if (actorIsUserOne && connection.type === ConnectionType.ONE_BLOCKED_TWO) {
+                return createErrorMessage(ErrorTypeToClient.USER_BLOCKED);
+            }
+            if (!actorIsUserOne && connection.type === ConnectionType.TWO_BLOCKED_ONE) {
+                return createErrorMessage(ErrorTypeToClient.USER_BLOCKED);
+            }
+        
+            let finalBlockState: ConnectionType;
+            if (actorIsUserOne) {
+                finalBlockState = (connection.type === ConnectionType.TWO_BLOCKED_ONE)
+                    ? ConnectionType.BOTH_BLOCKED
+                    : ConnectionType.ONE_BLOCKED_TWO;
+            } else {
+                finalBlockState = (connection.type === ConnectionType.ONE_BLOCKED_TWO)
+                    ? ConnectionType.BOTH_BLOCKED
+                    : ConnectionType.TWO_BLOCKED_ONE;
+            }
+        
+            db.saveConnection(user.username, username, finalBlockState);
+            broadcastToIdentifiers(db, [username], { type: MessageTypeToClient.USER_BLOCKED_U, data: { username: user.username } });
+        
+            return { type: MessageTypeToClient.SUCCESS };
+        }
+        
+        case MessageTypeToServer.USER_FRIEND_REQUEST: {
+            if (!user) return createErrorMessage(ErrorTypeToClient.MISSING_SESSION_ID);
+            const { username } = msg.data;
+        
+            if (user.username === username) {
+                return createErrorMessage(ErrorTypeToClient.CANNOT_FRIEND_REQUEST_SELF);
+            }
+        
+            const targetUser = db.getUser(username);
+            if (!targetUser) return createErrorMessage(ErrorTypeToClient.USER_DOESNT_EXIST);
+            
+            const connection = db.getConnectionState(user.username, username);
+        
+            if (connection.type === ConnectionType.BOTH_BLOCKED) {
+                return createErrorMessage(ErrorTypeToClient.USER_BLOCKED_U);
+            }
+            
+            const actorIsUserOne = user.username < username;
+            const amIBlocked = actorIsUserOne 
+                ? connection.type === ConnectionType.TWO_BLOCKED_ONE 
+                : connection.type === ConnectionType.ONE_BLOCKED_TWO;
+        
+            if (amIBlocked) {
+                return createErrorMessage(ErrorTypeToClient.USER_BLOCKED_U);
+            }
+        
+            const didIBlockThem = actorIsUserOne 
+                ? connection.type === ConnectionType.ONE_BLOCKED_TWO 
+                : connection.type === ConnectionType.TWO_BLOCKED_ONE;
+        
+            if (didIBlockThem) {
+                return createErrorMessage(ErrorTypeToClient.USER_BLOCKED);
+            }
+        
+            if (connection.type === ConnectionType.FRIENDS) {
+                return createErrorMessage(ErrorTypeToClient.ALREADY_CONNECTED);
+            }
+            if (connection.type === ConnectionType.ONE_REQUESTED_TWO || connection.type === ConnectionType.TWO_REQUESTED_ONE) {
+                return createErrorMessage(ErrorTypeToClient.ALREADY_CONNECTED);
+            }
+        
+            const requestType = actorIsUserOne 
+                ? ConnectionType.ONE_REQUESTED_TWO 
+                : ConnectionType.TWO_REQUESTED_ONE;
+        
+            db.saveConnection(user.username, username, requestType);
+            broadcastToIdentifiers(db, [username], { type: MessageTypeToClient.USER_PENDING_U, data: { username: user.username } });
+        
+            return { type: MessageTypeToClient.SUCCESS };
+        }
+        
+        case MessageTypeToServer.USER_ACCEPT: {
+            if (!user) return createErrorMessage(ErrorTypeToClient.MISSING_SESSION_ID);
+            const { username } = msg.data;
+        
+            const targetUser = db.getUser(username);
+            if (!targetUser) return createErrorMessage(ErrorTypeToClient.USER_DOESNT_EXIST);
+            
+            const connection = db.getConnectionState(user.username, username);
+        
+            const hasPendingRequest = connection.type === ConnectionType.ONE_REQUESTED_TWO || 
+                                     connection.type === ConnectionType.TWO_REQUESTED_ONE;
+        
+            if (hasPendingRequest && !connection.isInitiator) {
+                db.saveConnection(user.username, username, ConnectionType.FRIENDS);
+        
+                broadcastToIdentifiers(db, [username], { type: MessageTypeToClient.USER_ACCEPTED_U, data: { username: user.username } });
+        
+                return { type: MessageTypeToClient.SUCCESS };
+            }
+        
+            return createErrorMessage(ErrorTypeToClient.USER_NO_REQUEST);
+        }
+        
+        case MessageTypeToServer.USER_UNFRIEND: {
+            if (!user) return createErrorMessage(ErrorTypeToClient.MISSING_SESSION_ID);
+            const { username } = msg.data;
+        
+            const targetUser = db.getUser(username);
+            if (!targetUser) return createErrorMessage(ErrorTypeToClient.USER_DOESNT_EXIST);
+            
+            const connection = db.getConnectionState(user.username, username);
+        
+            if (connection.type === ConnectionType.FRIENDS) {
+                db.deleteConnection(user.username, username);
+        
+                broadcastToIdentifiers(db, [username], { type: MessageTypeToClient.USER_UNFRIENDED_U, data: { username: user.username } });
+        
+                return { type: MessageTypeToClient.SUCCESS };
+            }
+        
+            return createErrorMessage(ErrorTypeToClient.USER_NO_REQUEST);
         }
     }
 

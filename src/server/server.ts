@@ -12,7 +12,7 @@ export class Server {
         this.wss = this.setupWSS(config);
     }
 
-    setupWSS(config: Config = defaultConfig): WebSocketServer {
+    private setupWSS(config: Config = defaultConfig): WebSocketServer {
         const server = new WebSocketServer({
             port: config.getPort()
         })
