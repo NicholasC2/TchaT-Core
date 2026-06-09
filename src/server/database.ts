@@ -24,11 +24,11 @@ export class Profile {
 }
 
 export class Session {
-    session_id: string;
+    sessionId: string;
     username: string;
 
-    constructor(session_id: string, username: string) {
-        this.session_id = session_id;
+    constructor(sessionId: string, username: string) {
+        this.sessionId = sessionId;
         this.username = username;
     }
 }
@@ -73,16 +73,16 @@ export class MessageKey {
 export class Message {
     id: string;
     author: User;
-    encrypted_data: string;
-    created_at: number;
-    message_keys: MessageKey[];
+    encryptedData: string;
+    createdAt: number;
+    keys: MessageKey[];
 
-    constructor(id: string, author: User, encrypted_data: string, created_at: number, message_keys: MessageKey[]) {
+    constructor(id: string, author: User, encryptedData: string, createdAt: number, keys: MessageKey[]) {
         this.id = id;
         this.author = author;
-        this.encrypted_data = encrypted_data;
-        this.created_at = created_at;
-        this.message_keys = message_keys;
+        this.encryptedData = encryptedData;
+        this.createdAt = createdAt;
+        this.keys = keys;
     }
 }
 
@@ -110,12 +110,12 @@ export class GroupChatUser extends User {
 export abstract class Chat {
     id: string;
     type: ChatType;
-    created_at: number;
+    createdAt: number;
 
-    constructor(id: string, type: ChatType, created_at: number) {
+    constructor(id: string, type: ChatType, createdAt: number) {
         this.id = id;
         this.type = type;
-        this.created_at = created_at;
+        this.createdAt = createdAt;
     }
 }
 
@@ -390,7 +390,7 @@ export class Database {
     }
 
     /* --- Session Handling --- */
-    saveSession(session: Session) { this.saveSessionStmt.run(session.session_id, session.username); }
+    saveSession(session: Session) { this.saveSessionStmt.run(session.sessionId, session.username); }
     getSessionsByUsername(username: string): Session[] {
         const rows = this.getSessionsForUserStmt.all(username) as unknown as any[];
         return rows.map(r => new Session(r.session_id, r.username));
@@ -415,7 +415,7 @@ export class Database {
 
     /* --- Group Chat Handling --- */
     saveGroupChat(chat: GroupChat) {
-        this.saveGroupChatStmt.run(chat.id, chat.name, chat.created_at);
+        this.saveGroupChatStmt.run(chat.id, chat.name, chat.createdAt);
         for (const user of chat.users) {
             this.saveUser(user);
             this.insertGroupParticipantStmt.run(chat.id, user.username, user.admin ? 1 : 0);
@@ -426,7 +426,7 @@ export class Database {
     saveDM(chat: DMChat) {
         this.saveUser(chat.userOne);
         this.saveUser(chat.userTwo);
-        this.saveDMStmt.run(chat.id, chat.userOne.username, chat.userTwo.username, chat.created_at);
+        this.saveDMStmt.run(chat.id, chat.userOne.username, chat.userTwo.username, chat.createdAt);
     }
 
     /* --- Combined Unified Methods --- */
@@ -482,13 +482,13 @@ export class Database {
             }
         });
 
-        return chats.sort((a, b) => b.created_at - a.created_at);
+        return chats.sort((a, b) => b.createdAt - a.createdAt);
     }
 
     /* --- Message Handling --- */
     saveMessage(chatId: string, message: Message) {
-        this.saveMessageStmt.run(message.id, chatId, message.author.username, message.encrypted_data, message.created_at);
-        for (const msgKey of message.message_keys) {
+        this.saveMessageStmt.run(message.id, chatId, message.author.username, message.encryptedData, message.createdAt);
+        for (const msgKey of message.keys) {
             this.saveUser(msgKey.user);
             this.saveMessageKeyStmt.run(message.id, msgKey.user.username, msgKey.key);
         }

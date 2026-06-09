@@ -25,8 +25,8 @@ type GroupChatEdit = {
 }
 
 type MessageEdit = {
-    encrypted_data: string;
-    message_keys: MessageKey[];
+    encryptedData: string;
+    keys: MessageKey[];
 }
 
 type MessageToServer = | {
@@ -555,7 +555,20 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 return;
             }
 
-            if(db.getChat())
+            const dmExists = db.getAllChatsByUsername(user.username)
+                .filter(d => d instanceof DMChat)
+                .find(dm =>
+                    (dm.userOne.username === user.username
+                  && dm.userTwo.username === userTwo.username)
+                    ||
+                    (dm.userOne.username === userTwo.username
+                  && dm.userTwo.username === user.username)
+                );
+
+            if (dmExists) {
+                sendError(ErrorTypeToClient.DM_EXISTS);
+                return;
+            }
 
             const dm = new DMChat(crypto.randomUUID(), Date.now(), user, userTwo)
 
@@ -669,9 +682,7 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 return;
             }
 
-            const { encrypted_data, message_keys, chatID } = msg.data
-
-            const message = new Message(crypto.randomUUID(), user, encrypted_data, Date.now(), message_keys);
+            const { encryptedData, keys, chatID } = msg.data
 
             const chat = db.getChat(chatID)
 
@@ -680,9 +691,15 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 return;
             }
 
-            db.saveMessage(chatID, message);
+            if(isUserInChat(chat, user)) {
+                const message = new Message(crypto.randomUUID(), user, encryptedData, Date.now(), keys);
+                db.saveMessage(chatID, message);
+                sendMessage({ type: MessageTypeToClient.SUCCESS, data: message })
+            } else {
+                sendError(ErrorTypeToClient.CHAT_NOT_PARTICIPANT)
+                return;
+            }
 
-            sendMessage({ type: MessageTypeToClient.SUCCESS, data: message })
             
             break;
         }
@@ -711,14 +728,16 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 return;
             }
 
-            if(message.author.username !== user.username && ) {
+            if(message.author.username == user.username || checkIfUserIsAdmin(chat, user)) {
+                db.deleteMessage(messageID);
+
+                sendMessage({ type: MessageTypeToClient.SUCCESS });
+            } else {
                 sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
                 return;
             }
 
-            db.deleteMessage(messageID);
-
-            sendMessage({ type: MessageTypeToClient.SUCCESS });
+            break;
         }
 
         case MessageTypeToServer.MESSAGE_EDIT: {
@@ -726,6 +745,77 @@ export function serverHandleMessage(socket: WebSocket, db: Database, msg: Messag
                 sendError(ErrorTypeToClient.MISSING_SESSION_ID);
                 return;
             }
+
+            const { messageID, chatID, encryptedData, keys } = msg.data;
+
+            const chat = db.getChat(chatID);
+
+            if(!chat) {
+                sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                return;
+            }
+
+            const chatMessages = db.getChatMessages(chatID);
+
+            const message = chatMessages.find((m) => m.id === messageID);
+
+            if(!message) {
+                sendError(ErrorTypeToClient.MESSAGE_DOESNT_EXIST)
+                return;
+            }
+
+            if(message.author.username == user.username || checkIfUserIsAdmin(chat, user)) {
+                if(encryptedData) {
+                    message.encryptedData = encryptedData;
+                }
+
+                if(keys) {
+                    message.keys = keys;
+                }
+
+                db.saveMessage(chatID, message);
+
+                sendMessage({ type: MessageTypeToClient.SUCCESS });
+            } else {
+                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
+                return;
+            }
+
+            break;
+        }
+
+        case MessageTypeToServer.MESSAGE_GET: {
+            if(!user) {
+                sendError(ErrorTypeToClient.MISSING_SESSION_ID);
+                return;
+            }
+
+            const { messageID, chatID } = msg.data;
+
+            const chat = db.getChat(chatID);
+
+            if(!chat) {
+                sendError(ErrorTypeToClient.CHAT_DOESNT_EXIST);
+                return;
+            }
+
+            if(!isUserInChat(chat, user)) {
+                sendError(ErrorTypeToClient.USER_MISSING_PERMISSION);
+                return;
+            }
+
+            const chatMessages = db.getChatMessages(chatID);
+
+            const message = chatMessages.find((m) => m.id === messageID);
+
+            if(!message) {
+                sendError(ErrorTypeToClient.MESSAGE_DOESNT_EXIST)
+                return;
+            }
+
+            sendMessage({ type: MessageTypeToClient.SUCCESS, data: message });
+
+            break;
         }
     }
 }

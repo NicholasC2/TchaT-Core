@@ -21,6 +21,8 @@ export enum ErrorTypeToClient {
     CHAT_IS_DM,
     CHAT_IS_GROUP,
 
+    DM_EXISTS,
+
     MESSAGE_DOESNT_EXIST,
 }
 
